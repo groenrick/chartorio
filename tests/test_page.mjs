@@ -55,6 +55,7 @@ function contextStub() {
 
 function boot() {
   const timers = [];
+  const eventChannels = [];
   const context = {
     console: { log() {}, warn() {}, error() {}, info() {} },
     JSON, Math, Date, Object, Array, String, Number, Boolean, Map, Set,
@@ -82,16 +83,24 @@ function boot() {
     },
     EventSource: class {
       constructor(url) { this.url = url; }
-      addEventListener() {} close() {}
+      addEventListener(channel) { eventChannels.push(channel); }
+      close() {}
     },
   };
+  context.eventChannels = eventChannels;
   context.window = context;
   context.globalThis = context;
   context.self = context;
   const body = elementStub();
+  // One stub per id, kept, so a test can read back what the page wrote into an
+  // element the way a browser would.
+  const byId = new Map();
   context.document = {
     body, documentElement: elementStub(), head: elementStub(),
-    getElementById: () => elementStub(),
+    getElementById: (id) => {
+      if (!byId.has(id)) byId.set(id, elementStub());
+      return byId.get(id);
+    },
     createElement: () => elementStub(),
     createElementNS: () => elementStub(),
     querySelector: () => elementStub(),
@@ -169,6 +178,21 @@ test("a biter with nobody near it starts where it is", () => {
   const page = boot();
   const pairs = page.pairUnits([], [7, 9]);
   assert.deepEqual([pairs[0], pairs[1]], [7, 9], "a new biter must not slide in from elsewhere");
+});
+
+test("the viewer count shows what the hub pushed", () => {
+  const page = boot();
+  page.handleMessage(JSON.stringify({ channel: "viewers", payload: { viewers: 3 } }));
+  assert.equal(String(page.document.getElementById("viewer-count").textContent), "3");
+});
+
+test("the event stream fallback listens for the viewer count too", () => {
+  // Every channel has to work on both transports, and the fallback subscribes
+  // per channel by name: one missing here is a number that never updates.
+  const page = boot();
+  page.useEventStream();
+  assert.ok(page.eventChannels.includes("viewers"),
+            `/events subscribed to ${page.eventChannels.join(", ")}`);
 });
 
 test("ore totals read the way the game writes them", () => {
