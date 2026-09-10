@@ -43,6 +43,8 @@ local function initialise()
   storage.chartorio.revisions = storage.chartorio.revisions or {}
   storage.chartorio.dirty = storage.chartorio.dirty or {}
   storage.chartorio.alerts = storage.chartorio.alerts or {}
+  storage.chartorio.signals = storage.chartorio.signals or {}
+  storage.chartorio.signal_scanned = storage.chartorio.signal_scanned or {}
   storage.chartorio.alert_serial = storage.chartorio.alert_serial or 0
 end
 
@@ -119,10 +121,14 @@ end
 -- Change tracking: only chunks that actually changed get re-rendered.
 -- ---------------------------------------------------------------------------
 
+-- Defined further down, once the signal registry exists.
+local remember_signal_hook
+
 local function on_entity_changed(event)
   local entity = event.entity or event.destination
   if entity and entity.valid then
     touch_position(entity.surface, entity.position)
+    if remember_signal_hook then remember_signal_hook(entity) end
   end
 end
 
@@ -570,7 +576,6 @@ commands.add_command("chartorio_units", "Visible biters in a viewport: chartorio
   end
   x1, y1, x2, y2 = tonumber(x1), tonumber(y1), tonumber(x2), tonumber(y2)
 
-  -- Clamp around the centre so a zoomed out browser cannot ask for the world.
   local center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
   local half = MAX_QUERY_TILES / 2
   local clamped = (x2 - x1) > MAX_QUERY_TILES or (y2 - y1) > MAX_QUERY_TILES
@@ -579,25 +584,34 @@ commands.add_command("chartorio_units", "Visible biters in a viewport: chartorio
     y1, y2 = center_y - half, center_y + half
   end
 
+  -- Only chunks that are both on screen and currently seen are worth looking
+  -- at. Searching the whole viewport instead meant scanning a quarter of a
+  -- million tiles for a handful of biters.
   local visible = visible_lookup(surface, game.forces.player)
   local points = {}
   local truncated = false
-  local found = surface.find_entities_filtered({
-    area = {{x1, y1}, {x2, y2}},
-    type = "unit",
-    force = "enemy",
-  })
-  for _, unit in pairs(found) do
-    if #points >= UNIT_LIMIT * 2 then
-      truncated = true
-      break
+  local scanned = 0
+  for chunk_y = math.floor(y1 / CHUNK_SIZE), math.floor(y2 / CHUNK_SIZE) do
+    for chunk_x = math.floor(x1 / CHUNK_SIZE), math.floor(x2 / CHUNK_SIZE) do
+      if visible[chunk_x .. ":" .. chunk_y] then
+        scanned = scanned + 1
+        local area = {
+          {chunk_x * CHUNK_SIZE, chunk_y * CHUNK_SIZE},
+          {chunk_x * CHUNK_SIZE + CHUNK_SIZE, chunk_y * CHUNK_SIZE + CHUNK_SIZE},
+        }
+        for _, unit in pairs(surface.find_entities_filtered({area = area, type = "unit", force = "enemy"})) do
+          if #points >= UNIT_LIMIT * 2 then
+            truncated = true
+            break
+          end
+          local position = unit.position
+          points[#points + 1] = math.floor(position.x * 4) / 4
+          points[#points + 1] = math.floor(position.y * 4) / 4
+        end
+      end
+      if truncated then break end
     end
-    local position = unit.position
-    local chunk = math.floor(position.x / CHUNK_SIZE) .. ":" .. math.floor(position.y / CHUNK_SIZE)
-    if visible[chunk] then
-      points[#points + 1] = math.floor(position.x * 4) / 4
-      points[#points + 1] = math.floor(position.y * 4) / 4
-    end
+    if truncated then break end
   end
 
   respond({
@@ -605,238 +619,8 @@ commands.add_command("chartorio_units", "Visible biters in a viewport: chartorio
     units = points,
     truncated = truncated,
     clamped = clamped,
-    scanned = #found,
+    scanned = scanned,
   })
-end)
-
--- Resource patches have no API of their own, so walk outward chunk by chunk
--- from the one under the cursor for as long as neighbours hold the same ore.
--- Patches are contiguous, so this covers one patch and stops at its edge.
-local PATCH_CHUNK_LIMIT = 256
-
-local function patch_summary(surface, resource_name, start_x, start_y)
-  local visited = {}
-  local queue = {{start_x, start_y}}
-  local head = 1
-  local total, entity_count, chunks = 0, 0, 0
-  local min_x, min_y, max_x, max_y = math.huge, math.huge, -math.huge, -math.huge
-  local truncated = false
-
-  while head <= #queue do
-    local position = queue[head]
-    head = head + 1
-    local chunk_x, chunk_y = position[1], position[2]
-    local id = chunk_x .. ":" .. chunk_y
-    if not visited[id] then
-      visited[id] = true
-      if chunks >= PATCH_CHUNK_LIMIT then
-        truncated = true
-        break
-      end
-      local area = {
-        {chunk_x * CHUNK_SIZE, chunk_y * CHUNK_SIZE},
-        {chunk_x * CHUNK_SIZE + CHUNK_SIZE, chunk_y * CHUNK_SIZE + CHUNK_SIZE},
-      }
-      local found = surface.find_entities_filtered({area = area, name = resource_name})
-      if #found > 0 then
-        chunks = chunks + 1
-        entity_count = entity_count + #found
-        for _, entity in pairs(found) do
-          total = total + entity.amount
-          local entity_position = entity.position
-          if entity_position.x < min_x then min_x = entity_position.x end
-          if entity_position.y < min_y then min_y = entity_position.y end
-          if entity_position.x > max_x then max_x = entity_position.x end
-          if entity_position.y > max_y then max_y = entity_position.y end
-        end
-        queue[#queue + 1] = {chunk_x + 1, chunk_y}
-        queue[#queue + 1] = {chunk_x - 1, chunk_y}
-        queue[#queue + 1] = {chunk_x, chunk_y + 1}
-        queue[#queue + 1] = {chunk_x, chunk_y - 1}
-      end
-    end
-  end
-
-  return {
-    total = total,
-    entities = entity_count,
-    chunks = chunks,
-    truncated = truncated,
-    bounds = entity_count > 0 and {min_x, min_y, max_x, max_y} or nil,
-  }
-end
-
-commands.add_command("chartorio_resource", "Patch total under a point: chartorio_resource <surface> <x> <y>.", function(command)
-  initialise()
-  local surface_name, x, y = string.match(command.parameter or "", "^(%S+)%s+(-?%d+)%s+(-?%d+)$")
-  local surface = surface_name and game.surfaces[surface_name]
-  if not surface then
-    return respond({error = "usage: chartorio_resource <surface> <x> <y>"})
-  end
-  x, y = tonumber(x), tonumber(y)
-
-  -- The cursor lands on a tile, not exactly on an entity, so look in its square.
-  local here = surface.find_entities_filtered({
-    area = {{x, y}, {x + 1, y + 1}},
-    type = "resource",
-  })
-  if #here == 0 then
-    return respond({found = false})
-  end
-
-  local resource = here[1]
-  local prototype = resource.prototype
-  local summary = patch_summary(surface, resource.name, math.floor(x / CHUNK_SIZE), math.floor(y / CHUNK_SIZE))
-
-  -- Infinite resources such as crude oil are shown as a yield percentage,
-  -- derived from the prototype rather than a hard coded divisor.
-  local infinite = prototype.infinite_resource or false
-  local normal = prototype.normal_resource_amount
-  local percent = nil
-  if infinite and normal and normal > 0 then
-    percent = summary.total / normal * 100
-  end
-
-  respond({
-    found = true,
-    name = resource.name,
-    localised = resource.name,
-    infinite = infinite,
-    total = summary.total,
-    percent = percent,
-    entities = summary.entities,
-    chunks = summary.chunks,
-    truncated = summary.truncated,
-    bounds = summary.bounds,
-  })
-end)
-
-commands.add_command("chartorio_tags", "Map tags placed in game: chartorio_tags <surface>.", function(command)
-  initialise()
-  local surface = game.surfaces[command.parameter or "nauvis"]
-  if not surface then return respond({error = "unknown surface"}) end
-  local tags = {}
-  for _, tag in pairs(game.forces.player.find_chart_tags(surface)) do
-    local position = tag.position
-    tags[#tags + 1] = {
-      id = tag.tag_number,
-      x = position.x,
-      y = position.y,
-      text = tag.text,
-      icon = tag.icon and (tag.icon.type .. "/" .. (tag.icon.name or "")) or nil,
-      author = tag.last_user and tag.last_user.name or nil,
-    }
-  end
-  respond({surface = surface.name, tags = tags})
-end)
-
-commands.add_command("chartorio_pollution", "Pollution in view: chartorio_pollution <surface> <cx1> <cy1> <cx2> <cy2>.", function(command)
-  initialise()
-  local surface_name, x1, y1, x2, y2 = string.match(
-    command.parameter or "", "^(%S+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)$")
-  local surface = surface_name and game.surfaces[surface_name]
-  if not surface then
-    return respond({error = "usage: chartorio_pollution <surface> <cx1> <cy1> <cx2> <cy2>"})
-  end
-  x1, y1, x2, y2 = tonumber(x1), tonumber(y1), tonumber(x2), tonumber(y2)
-  if x2 < x1 then x1, x2 = x2, x1 end
-  if y2 < y1 then y1, y2 = y2, y1 end
-  while (x2 - x1 + 1) * (y2 - y1 + 1) > MAX_INDEX_CHUNKS do
-    if (x2 - x1) >= (y2 - y1) then x1, x2 = x1 + 1, x2 - 1 else y1, y2 = y1 + 1, y2 - 1 end
-  end
-
-  local force = game.forces.player
-  local values = {}
-  local peak = 0
-  for chunk_y = y1, y2 do
-    for chunk_x = x1, x2 do
-      if force.is_chunk_charted(surface, {chunk_x, chunk_y}) then
-        local amount = surface.get_pollution({chunk_x * CHUNK_SIZE + 16, chunk_y * CHUNK_SIZE + 16})
-        if amount > 1 then
-          values[#values + 1] = chunk_x
-          values[#values + 1] = chunk_y
-          values[#values + 1] = math.floor(amount)
-          if amount > peak then peak = amount end
-        end
-      end
-    end
-  end
-  respond({surface = surface.name, peak = math.floor(peak), chunks = values})
-end)
-
-commands.add_command("chartorio_alerts", "Recent losses on the player force.", function()
-  initialise()
-  local alerts = {}
-  for _, alert in pairs(storage.chartorio.alerts) do
-    alerts[#alerts + 1] = alert
-  end
-  respond({tick = game.tick, alerts = alerts})
-end)
-
--- Rail signals, with the state the game is actually showing on them. Viewport
--- scoped like the biters: a built up base holds hundreds of them.
-local SIGNAL_LIMIT = 800
-
-local signal_state_names = {}
-for name, value in pairs(defines.signal_state) do
-  signal_state_names[value] = name
-end
-
-local chain_state_names = {}
-for name, value in pairs(defines.chain_signal_state or {}) do
-  chain_state_names[value] = name
-end
-
-commands.add_command("chartorio_signals", "Rail signals in view: chartorio_signals <surface> <x1> <y1> <x2> <y2>.", function(command)
-  initialise()
-  local surface_name, x1, y1, x2, y2 = string.match(
-    command.parameter or "", "^(%S+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)$")
-  local surface = surface_name and game.surfaces[surface_name]
-  if not surface then
-    return respond({error = "usage: chartorio_signals <surface> <x1> <y1> <x2> <y2>"})
-  end
-  x1, y1, x2, y2 = tonumber(x1), tonumber(y1), tonumber(x2), tonumber(y2)
-
-  local center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
-  local clamped = (x2 - x1) > MAX_QUERY_TILES or (y2 - y1) > MAX_QUERY_TILES
-  if clamped then
-    x1, x2 = center_x - MAX_QUERY_TILES / 2, center_x + MAX_QUERY_TILES / 2
-    y1, y2 = center_y - MAX_QUERY_TILES / 2, center_y + MAX_QUERY_TILES / 2
-  end
-
-  local force = game.forces.player
-  local signals = {}
-  local truncated = false
-  local found = surface.find_entities_filtered({
-    area = {{x1, y1}, {x2, y2}},
-    type = {"rail-signal", "rail-chain-signal"},
-    force = force,
-  })
-  for _, entity in pairs(found) do
-    if #signals >= SIGNAL_LIMIT then
-      truncated = true
-      break
-    end
-    if entity.valid then
-      local chain = entity.type == "rail-chain-signal"
-      local state
-      local ok, value = pcall(function()
-        if chain then return chain_state_names[entity.chain_signal_state] end
-        return signal_state_names[entity.signal_state]
-      end)
-      state = ok and value or "unknown"
-      local position = entity.position
-      signals[#signals + 1] = {
-        x = position.x,
-        y = position.y,
-        direction = entity.direction,
-        chain = chain,
-        state = state or "unknown",
-      }
-    end
-  end
-
-  respond({surface = surface.name, signals = signals, truncated = truncated, clamped = clamped})
 end)
 
 commands.add_command("chartorio_events", "Which change events this build registered.", function()

@@ -329,7 +329,7 @@ function resize() {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.imageSmoothingEnabled = false;
   updateCenterPoint();
-  scheduleIndexRefresh();
+  sendViewport();
   requestDraw();
 }
 
@@ -1105,48 +1105,51 @@ function renderPanel() {
 
 // The index is per viewport: a played save holds far too many chunks to list
 // them all, so ask for the rectangle on screen and merge what comes back.
-function viewportChunkBox(margin = 2) {
-  const topLeft = screenToWorld(0, 0);
-  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
-  return {
-    x1: Math.floor(topLeft.x / CHUNK_TILES) - margin,
-    y1: Math.floor(topLeft.y / CHUNK_TILES) - margin,
-    x2: Math.floor(bottomRight.x / CHUNK_TILES) + margin,
-    y2: Math.floor(bottomRight.y / CHUNK_TILES) + margin,
-  };
-}
-
-async function loadIndex() {
-  try {
-    const box = viewportChunkBox();
-    const query = new URLSearchParams({ surface: SURFACE, ...box });
-    const payload = await (await fetch("/chunks?" + query)).json();
-    if (payload.size) tilePixels = payload.size;
-    if (payload.seed !== undefined && payload.seed !== worldSeed) {
-      worldSeed = payload.seed;      // a different world reuses chunk coordinates
-      charted.clear();
-      tiles.clear();
-      tileQueue = [];
-      spotlightCache = null;
-      tileGeneration++;
-    }
-    const flat = payload.chunks || [];
-    for (let index = 0; index + 2 < flat.length; index += 3) {
-      charted.set(key(flat[index], flat[index + 1]), flat[index + 2]);
-    }
-    rebuildZoomIndex();
-    document.getElementById("chunk-count").textContent = charted.size;
-    requestDraw();
-  } catch (error) {
-    /* the next pan or poll tries again */
+function applyChunks(payload) {
+  if (payload.size) tilePixels = payload.size;
+  if (payload.seed !== undefined && payload.seed !== worldSeed) {
+    worldSeed = payload.seed;      // a different world reuses chunk coordinates
+    charted.clear();
+    tiles.clear();
+    tileQueue = [];
+    spotlightCache = null;
+    tileGeneration++;
   }
+  const flat = payload.chunks || [];
+  for (let index = 0; index + 2 < flat.length; index += 3) {
+    charted.set(key(flat[index], flat[index + 1]), flat[index + 2]);
+  }
+  rebuildZoomIndex();
+  document.getElementById("chunk-count").textContent = charted.size;
+  requestDraw();
 }
 
-// Panning and zooming reveal chunks the index has never been asked about.
-let indexTimer = null;
-function scheduleIndexRefresh() {
-  if (indexTimer) clearTimeout(indexTimer);
-  indexTimer = setTimeout(() => { loadIndex(); loadPollution(); pollSignals(); }, 250);
+// Panning, zooming or toggling a layer changes what this browser needs, so it
+// tells the server once instead of polling for it.
+let viewportTimer = null;
+function sendViewport(immediate = false) {
+  if (viewportTimer) clearTimeout(viewportTimer);
+  const send = () => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const topLeft = screenToWorld(0, 0);
+    const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
+    socket.send(JSON.stringify({
+      type: "viewport",
+      x1: Math.floor(topLeft.x) - 16,
+      y1: Math.floor(topLeft.y) - 16,
+      x2: Math.ceil(bottomRight.x) + 16,
+      y2: Math.ceil(bottomRight.y) + 16,
+      chunks: [
+        Math.floor(topLeft.x / CHUNK_TILES) - 2,
+        Math.floor(topLeft.y / CHUNK_TILES) - 2,
+        Math.floor(bottomRight.x / CHUNK_TILES) + 2,
+        Math.floor(bottomRight.y / CHUNK_TILES) + 2,
+      ],
+      scale: view.scale,
+      layers: layers,
+    }));
+  };
+  if (immediate) send(); else viewportTimer = setTimeout(send, 200);
 }
 
 let dragging = false;
@@ -1272,7 +1275,7 @@ canvas.addEventListener("pointerleave", () => {
 
 function endDrag(event) {
   dragging = false;
-  scheduleIndexRefresh();
+  sendViewport();
   canvas.classList.remove("dragging");
   if (event && event.pointerId !== undefined && canvas.hasPointerCapture(event.pointerId)) {
     canvas.releasePointerCapture(event.pointerId);
@@ -1290,7 +1293,7 @@ canvas.addEventListener("wheel", (event) => {
   const after = screenToWorld(event.clientX, event.clientY);
   view.x += before.x - after.x;
   view.y += before.y - after.y;
-  scheduleIndexRefresh();
+  sendViewport();
   requestDraw();
 }, { passive: false });
 
@@ -1300,68 +1303,24 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("resize", resize);
 
-// Biters are asked for per viewport, so the game never scans more than the
-// browser is actually showing.
-async function pollUnits() {
-  if (!layers.biters) {
-    if (units.length) { units = []; unitPairs = []; requestDraw(); }
-    return;
-  }
-  const topLeft = screenToWorld(0, 0);
-  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
-  const query = new URLSearchParams({
-    surface: SURFACE,
-    x1: Math.floor(topLeft.x) - 16,
-    y1: Math.floor(topLeft.y) - 16,
-    x2: Math.ceil(bottomRight.x) + 16,
-    y2: Math.ceil(bottomRight.y) + 16,
-  });
-  try {
-    const payload = await (await fetch("/units?" + query)).json();
-    const next = payload.units || [];
-    unitPairs = pairUnits(units, next);
-    units = next;
-    unitsArrivedAt = performance.now();
-    unitsTruncated = Boolean(payload.truncated);
-    const count = units.length / 2;
-    document.getElementById("biter-count").textContent = count + (unitsTruncated ? "+" : "");
-    if (!animating) animate(); else requestDraw();
-  } catch (error) {
-    /* next tick tries again */
-  }
+// Biters and signals arrive over the socket; the browser only says where it
+// is looking. applyUnits keeps the pairing that makes them move smoothly.
+function applyUnits(payload) {
+  const next = payload.units || [];
+  unitPairs = pairUnits(units, next);
+  units = next;
+  unitsArrivedAt = performance.now();
+  unitsTruncated = Boolean(payload.truncated);
+  document.getElementById("biter-count").textContent =
+    units.length / 2 + (unitsTruncated ? "+" : "");
+  if (!animating) animate(); else requestDraw();
 }
 
-const UNIT_POLL_MS = 300;
-unitInterval = UNIT_POLL_MS;
-setInterval(pollUnits, UNIT_POLL_MS);
-
-// Signal states change with every train, but a signal never moves, so this is
-// a plain refresh rather than anything interpolated.
-async function pollSignals() {
-  if (!layers.signals || view.scale < SIGNAL_MIN_SCALE) {
-    if (signals.length) { signals = []; requestDraw(); }
-    return;
-  }
-  const topLeft = screenToWorld(0, 0);
-  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
-  const query = new URLSearchParams({
-    surface: SURFACE,
-    x1: Math.floor(topLeft.x) - 8,
-    y1: Math.floor(topLeft.y) - 8,
-    x2: Math.ceil(bottomRight.x) + 8,
-    y2: Math.ceil(bottomRight.y) + 8,
-  });
-  try {
-    const payload = await (await fetch("/signals?" + query)).json();
-    signals = payload.signals || [];
-    document.getElementById("signal-count").textContent = signals.length;
-    requestDraw();
-  } catch (error) {
-    /* next tick */
-  }
+function applySignals(payload) {
+  signals = payload.signals || [];
+  document.getElementById("signal-count").textContent = signals.length;
+  requestDraw();
 }
-
-setInterval(pollSignals, 1000);
 
 const LEGEND = [
   {
@@ -1485,9 +1444,7 @@ for (const name of Object.keys(layers)) {
   const input = document.getElementById("layer-" + name);
   input.addEventListener("change", () => {
     layers[name] = input.checked;
-    if (name === "biters" && input.checked) pollUnits();
-    if (name === "pollution" && input.checked) loadPollution();
-    if (name === "signals" && input.checked) pollSignals();
+    sendViewport(true);
     if (highlight && !layers[{ color: "terrain", units: "biters", players: "players", trains: "trains",
                                tags: "tags", alerts: "alerts", signals: "signals" }[highlight.highlight]]) {
       highlight = null;
@@ -1497,88 +1454,94 @@ for (const name of Object.keys(layers)) {
   });
 }
 
-const events = new EventSource("/events");
-events.addEventListener("state", (event) => {
-  const next = JSON.parse(event.data);
-  previousState = state.players || state.trains ? state : null;
-  stateInterval = Math.max(80, (next.interval || 0.25) * 1000);
-  stateArrivedAt = performance.now();
-  state = next;
-  followTarget();
-  renderPanel();
-  if (!animating) animate(); else requestDraw();
-});
-events.addEventListener("tiles", (event) => {
-  for (const chunk of JSON.parse(event.data).chunks || []) {
-    if (chunk.surface !== SURFACE) continue;
-    charted.set(key(chunk.x, chunk.y), chunk.revision);
-    for (let zoom = 0; zoom <= MAX_ZOOM; zoom++) {
-      tiles.delete(`${zoom}:${chunk.x >> zoom},${chunk.y >> zoom}`);
-    }
-    tileGeneration++;
-  }
-  rebuildZoomIndex();
-  document.getElementById("chunk-count").textContent = charted.size;
-  requestDraw();
-});
-events.addEventListener("index", () => { loadIndex(); loadPalette(); });
-events.addEventListener("tags", (event) => {
-  tags = JSON.parse(event.data).tags || [];
-  document.getElementById("tag-count").textContent = tags.length;
-  requestDraw();
-});
-events.addEventListener("pollution", () => { loadPollution(); });
-events.addEventListener("alerts", (event) => {
-  alerts = JSON.parse(event.data).alerts || [];
-  renderAlerts();
-  requestDraw();
-});
-events.onerror = () => {
-  document.getElementById("status-dot").className = "dot down";
-  document.getElementById("status-text").textContent = "bridge unreachable";
-};
+// One socket carries every live channel. The browser sends its viewport; the
+// server pushes only what changed, and asks the game for nothing at all when
+// no one is connected.
+let socket = null;
+let reconnectDelay = 500;
 
-async function loadTags() {
-  try {
-    const payload = await (await fetch(`/tags?surface=${SURFACE}`)).json();
-    tags = payload.tags || [];
-    document.getElementById("tag-count").textContent = tags.length;
-    requestDraw();
-  } catch (error) {
-    /* the poller will publish it again */
-  }
+function setStatus(text, up) {
+  document.getElementById("status-dot").className = "dot " + (up ? "up" : "down");
+  document.getElementById("status-text").textContent = text;
 }
 
-async function loadPollution() {
-  if (!layers.pollution) return;
-  try {
-    const query = new URLSearchParams({ surface: SURFACE, ...viewportChunkBox() });
-    const payload = await (await fetch("/pollution?" + query)).json();
+const CHANNELS = {
+  state: (payload) => {
+    const next = payload;
+    previousState = state.players || state.trains ? state : null;
+    stateInterval = Math.max(80, (next.interval || 0.25) * 1000);
+    stateArrivedAt = performance.now();
+    state = next;
+    followTarget();
+    renderPanel();
+    if (!animating) animate(); else requestDraw();
+  },
+  chunks: applyChunks,
+  units: applyUnits,
+  signals: applySignals,
+  pollution: (payload) => {
     pollution = { peak: payload.peak || 0, chunks: payload.chunks || [] };
     document.getElementById("pollution-peak").textContent = pollution.peak;
     requestDraw();
-  } catch (error) {
-    /* same */
-  }
-}
-
-async function loadAlerts() {
-  try {
-    const payload = await (await fetch("/alerts")).json();
+  },
+  tags: (payload) => {
+    tags = payload.tags || [];
+    document.getElementById("tag-count").textContent = tags.length;
+    requestDraw();
+  },
+  alerts: (payload) => {
     alerts = payload.alerts || [];
     renderAlerts();
     requestDraw();
-  } catch (error) {
-    /* same */
-  }
+  },
+  tiles: (payload) => {
+    for (const chunk of payload.chunks || []) {
+      if (chunk.surface !== SURFACE) continue;
+      charted.set(key(chunk.x, chunk.y), chunk.revision);
+      for (let zoom = 0; zoom <= MAX_ZOOM; zoom++) {
+        tiles.delete(`${zoom}:${chunk.x >> zoom},${chunk.y >> zoom}`);
+      }
+      tileGeneration++;
+    }
+    rebuildZoomIndex();
+    document.getElementById("chunk-count").textContent = charted.size;
+    requestDraw();
+  },
+};
+
+function connect() {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  socket = new WebSocket(`${protocol}//${location.host}/ws`);
+
+  socket.onopen = () => {
+    reconnectDelay = 500;
+    setStatus("connected", true);
+    sendViewport(true);
+    loadPalette();
+  };
+
+  socket.onmessage = (event) => {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch (error) {
+      return;
+    }
+    const handler = CHANNELS[message.channel];
+    if (handler) handler(message.payload || {});
+  };
+
+  socket.onclose = () => {
+    setStatus("reconnecting…", false);
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(10000, reconnectDelay * 2);
+  };
+
+  socket.onerror = () => { if (socket) socket.close(); };
 }
 
-loadIndex();
-loadPalette();
-loadTags();
-loadPollution();
-loadAlerts();
-pollUnits();
+connect();
+
 resize();
 renderPanel();
 </script>

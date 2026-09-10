@@ -14,6 +14,8 @@ import socket
 import struct
 import threading
 import time
+import base64
+import hashlib
 import zlib
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +29,13 @@ STATE_INTERVAL = float(os.environ.get("CHARTORIO_STATE_INTERVAL", "0.25"))
 DIRTY_INTERVAL = float(os.environ.get("CHARTORIO_DIRTY_INTERVAL", "2"))
 INDEX_INTERVAL = float(os.environ.get("CHARTORIO_INDEX_INTERVAL", "10"))
 TILE_CACHE_SIZE = int(os.environ.get("CHARTORIO_TILE_CACHE", "3000"))
+UNIT_INTERVAL = float(os.environ.get("CHARTORIO_UNIT_INTERVAL", "0.3"))
+SIGNAL_INTERVAL = float(os.environ.get("CHARTORIO_SIGNAL_INTERVAL", "1"))
+INDEX_VIEW_INTERVAL = float(os.environ.get("CHARTORIO_INDEX_VIEW_INTERVAL", "5"))
+POLLUTION_INTERVAL = float(os.environ.get("CHARTORIO_POLLUTION_INTERVAL", "15"))
+# Chunk rasters are the heaviest thing the game does for us, so cap how many
+# can be asked for per second no matter how fast a browser pans.
+TILE_RENDERS_PER_SECOND = float(os.environ.get("CHARTORIO_TILE_RATE", "8"))
 MAX_ZOOM = int(os.environ.get("CHARTORIO_MAX_ZOOM", "3"))
 TILE_PX = 64
 # strict keeps the fog honest: only charted chunks can be rendered at all.
@@ -163,39 +172,174 @@ class RconClient:
 RCON = RconClient(RCON_HOST, RCON_PORT, RCON_PASSWORD)
 
 
+# What the game is actually being asked to do, so load can be looked at rather
+# than guessed at. Exposed on /status.
+METRICS = {"started": time.time(), "calls": {}, "seconds": {}}
+METRICS_LOCK = threading.Lock()
+
+
 def call(command):
-    return json.loads(RCON.command(command))
+    name = command.split(" ", 1)[0].lstrip("/")
+    start = time.time()
+    try:
+        return json.loads(RCON.command(command))
+    finally:
+        elapsed = time.time() - start
+        with METRICS_LOCK:
+            METRICS["calls"][name] = METRICS["calls"].get(name, 0) + 1
+            METRICS["seconds"][name] = METRICS["seconds"].get(name, 0.0) + elapsed
 
 
-class Broadcaster:
-    """Fan-out of named events to every open server-sent events stream."""
-
-    def __init__(self, backlog=64):
-        self.condition = threading.Condition()
-        self.sequence = 0
-        self.messages = []
-        self.backlog = backlog
-
-    def publish(self, name, payload):
-        with self.condition:
-            self.sequence += 1
-            self.messages.append((self.sequence, name, json.dumps(payload)))
-            del self.messages[:-self.backlog]
-            self.condition.notify_all()
-
-    def current(self):
-        with self.condition:
-            return self.sequence
-
-    def since(self, seen, timeout):
-        with self.condition:
-            if self.sequence == seen:
-                self.condition.wait(timeout)
-            pending = [m for m in self.messages if m[0] > seen]
-            return self.sequence, pending
+class WebSocketError(Exception):
+    pass
 
 
-EVENTS = Broadcaster()
+def websocket_accept(key):
+    digest = hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-5AB0DC85B11F").encode()).digest()
+    return base64.b64encode(digest).decode()
+
+
+class WebSocketConnection:
+    """One browser. Holds what that browser is looking at, so the poller only
+    asks the game for things somebody is actually watching."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.lock = threading.Lock()
+        self.open = True
+        self.viewport = None          # (x1, y1, x2, y2) in world tiles
+        self.chunk_box = None         # (x1, y1, x2, y2) in chunk coordinates
+        self.scale = 1.0
+        self.layers = {}
+        self.last = {}                # channel -> last payload sent, to skip repeats
+        self.due = {}                 # channel -> earliest next poll
+
+    def send(self, channel, payload, force=False):
+        if not self.open:
+            return
+        if not force:
+            with self.lock:
+                if self.last.get(channel) == payload:
+                    return
+                self.last[channel] = payload
+        frame = json.dumps({"channel": channel, "payload": payload})
+        self.send_text(frame)
+
+    def send_text(self, text):
+        data = text.encode("utf-8")
+        header = bytearray([0x81])
+        length = len(data)
+        if length < 126:
+            header.append(length)
+        elif length < 65536:
+            header.append(126)
+            header += struct.pack(">H", length)
+        else:
+            header.append(127)
+            header += struct.pack(">Q", length)
+        try:
+            with self.lock:
+                self.connection.sendall(bytes(header) + data)
+        except OSError:
+            self.open = False
+
+    def close(self):
+        self.open = False
+        try:
+            self.connection.close()
+        except OSError:
+            pass
+
+    def read_message(self):
+        """Read one text message. Returns None on close."""
+        header = self._read_exactly(2)
+        if header is None:
+            return None
+        final_and_opcode, second = header[0], header[1]
+        opcode = final_and_opcode & 0x0F
+        masked = second & 0x80
+        length = second & 0x7F
+        if length == 126:
+            extra = self._read_exactly(2)
+            if extra is None:
+                return None
+            length = struct.unpack(">H", extra)[0]
+        elif length == 127:
+            extra = self._read_exactly(8)
+            if extra is None:
+                return None
+            length = struct.unpack(">Q", extra)[0]
+        if length > 1 << 20:
+            raise WebSocketError("frame too large")
+        mask = self._read_exactly(4) if masked else b"\x00\x00\x00\x00"
+        if mask is None:
+            return None
+        data = self._read_exactly(length) if length else b""
+        if data is None:
+            return None
+        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
+
+        if opcode == 0x8:                      # close
+            return None
+        if opcode == 0x9:                      # ping, answer with pong
+            with self.lock:
+                try:
+                    self.connection.sendall(bytes([0x8A, len(payload)]) + payload)
+                except OSError:
+                    self.open = False
+            return ""
+        if opcode == 0xA:                      # pong
+            return ""
+        if opcode != 0x1:
+            return ""
+        return payload.decode("utf-8", "replace")
+
+    def _read_exactly(self, count):
+        data = b""
+        while len(data) < count:
+            try:
+                chunk = self.connection.recv(count - len(data))
+            except OSError:
+                return None
+            if not chunk:
+                return None
+            data += chunk
+        return data
+
+
+class Hub:
+    """Every connected browser, and what the game therefore has to be asked."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.clients = []
+
+    def add(self, client):
+        with self.lock:
+            self.clients.append(client)
+
+    def remove(self, client):
+        with self.lock:
+            if client in self.clients:
+                self.clients.remove(client)
+        client.close()
+
+    def snapshot(self):
+        with self.lock:
+            return [client for client in self.clients if client.open]
+
+    def broadcast(self, channel, payload):
+        for client in self.snapshot():
+            client.send(channel, payload)
+
+    def any_layer(self, name):
+        return any(client.layers.get(name) for client in self.snapshot())
+
+    def viewers(self):
+        return len(self.snapshot())
+
+
+HUB = Hub()
 
 
 class World:
@@ -457,8 +601,34 @@ def refresh_palette(expected_size):
         return colors
 
 
+class RateLimiter:
+    """Spaces out the work the game does for us. Panning can queue dozens of
+    chunk rasters, and each one is Lua walking a thousand tiles and every
+    entity in the chunk; unthrottled that lands as stutter in the game."""
+
+    def __init__(self, per_second):
+        self.interval = 1.0 / per_second if per_second > 0 else 0.0
+        self.lock = threading.Lock()
+        self.next_slot = 0.0
+
+    def wait(self):
+        if self.interval <= 0:
+            return
+        with self.lock:
+            now = time.time()
+            slot = max(now, self.next_slot)
+            self.next_slot = slot + self.interval
+        delay = slot - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+
+TILE_LIMITER = RateLimiter(TILE_RENDERS_PER_SECOND)
+
+
 def render_leaf(surface, chunk_x, chunk_y):
     """One chunk, straight from the game, as RGBA pixels."""
+    TILE_LIMITER.wait()
     payload = call("/chartorio_chunk %s %d %d" % (surface, chunk_x, chunk_y))
     if "runs" not in payload:
         raise RconError(payload.get("error", "malformed chunk response"))
@@ -568,75 +738,128 @@ def render_tile(surface, zoom, tile_x, tile_y):
     return signature, png
 
 
-def state_poller():
-    failures = 0
-    while True:
+def poll_state():
+    try:
+        payload = call("/chartorio")
+        for key in ("players", "trains"):
+            if not isinstance(payload.get(key), list):
+                payload[key] = []
+        payload["connected"] = True
+        payload["interval"] = STATE_INTERVAL
+        WORLD.set_state(payload)
+        HUB.broadcast("state", payload)
+        return True
+    except (OSError, RconError, ValueError) as error:
+        offline = {"connected": False, "error": "%s: %s" % (type(error).__name__, error),
+                   "players": [], "trains": []}
+        WORLD.set_state(offline)
+        HUB.broadcast("state", offline)
+        return False
+
+
+def poll_dirty():
+    try:
+        payload = call("/chartorio_dirty")
+    except (OSError, RconError, ValueError):
+        return
+    changed = []
+    for entry in payload.get("chunks", []) or []:
+        WORLD.note_charted(entry["surface"], entry["x"], entry["y"], entry.get("revision", 0))
+        WORLD.drop_tile_column(entry["surface"], entry["x"], entry["y"])
+        changed.append({"surface": entry["surface"], "x": entry["x"], "y": entry["y"],
+                        "revision": entry.get("revision", 0)})
+    if changed:
+        for client in HUB.snapshot():
+            client.send("tiles", {"chunks": changed}, force=True)
+
+    try:
+        alerts = call("/chartorio_alerts")
+    except (OSError, RconError, ValueError):
+        return
+    current = alerts.get("alerts")
+    current = current if isinstance(current, list) else []
+    if current != WORLD.alerts:
+        WORLD.alerts = current
+        HUB.broadcast("alerts", {"tick": alerts.get("tick", 0), "alerts": current})
+
+
+def poll_tags(surface="nauvis"):
+    try:
+        tags = call("/chartorio_tags %s" % surface)
+    except (OSError, RconError, ValueError):
+        return
+    found = tags.get("tags")
+    found = found if isinstance(found, list) else []
+    if found != WORLD.tags.get(surface):
+        WORLD.tags[surface] = found
+    HUB.broadcast("tags", {"surface": surface, "tags": found})
+
+
+def serve_client_viewport(client, now):
+    """Ask the game only for what this browser has switched on and is looking
+    at. Identical viewports collapse in the caches underneath."""
+    if client.viewport is None:
+        return
+    surface = "nauvis"
+    box = (surface,) + client.viewport
+
+    if client.layers.get("biters") and now >= client.due.get("units", 0):
+        client.due["units"] = now + UNIT_INTERVAL
         try:
-            payload = call("/chartorio")
-            for key in ("players", "trains"):
-                if not isinstance(payload.get(key), list):
-                    payload[key] = []
-            payload["connected"] = True
-            payload["interval"] = STATE_INTERVAL
-            WORLD.set_state(payload)
-            EVENTS.publish("state", payload)
-            failures = 0
-            time.sleep(STATE_INTERVAL)
-        except (OSError, RconError, ValueError) as error:
-            failures += 1
-            offline = {
-                "connected": False,
-                "error": "%s: %s" % (type(error).__name__, error),
-                "players": [],
-                "trains": [],
-            }
-            WORLD.set_state(offline)
-            EVENTS.publish("state", offline)
-            time.sleep(min(30, 2 ** min(failures, 4)))
-
-
-def dirty_poller():
-    while True:
-        time.sleep(DIRTY_INTERVAL)
-        try:
-            payload = call("/chartorio_dirty")
-        except (OSError, RconError, ValueError):
-            continue
-        changed = []
-        for entry in payload.get("chunks", []) or []:
-            WORLD.note_charted(entry["surface"], entry["x"], entry["y"], entry.get("revision", 0))
-            WORLD.drop_tile_column(entry["surface"], entry["x"], entry["y"])
-            changed.append({"surface": entry["surface"], "x": entry["x"], "y": entry["y"],
-                            "revision": entry.get("revision", 0)})
-        if changed:
-            EVENTS.publish("tiles", {"chunks": changed})
-
-        try:
-            alerts = call("/chartorio_alerts")
-        except (OSError, RconError, ValueError):
-            continue
-        current = alerts.get("alerts")
-        current = current if isinstance(current, list) else []
-        if current != WORLD.alerts:
-            WORLD.alerts = current
-            EVENTS.publish("alerts", {"tick": alerts.get("tick", 0), "alerts": current})
-
-
-def index_poller():
-    """Only map tags are cheap enough to poll globally; chunks and pollution
-    are fetched per viewport when a browser asks for them."""
-    while True:
-        surface = "nauvis"
-        try:
-            tags = call("/chartorio_tags %s" % surface)
-            found = tags.get("tags")
-            found = found if isinstance(found, list) else []
-            if found != WORLD.tags.get(surface):
-                WORLD.tags[surface] = found
-                EVENTS.publish("tags", {"surface": surface, "tags": found})
+            client.send("units", UNITS.get(box))
         except (OSError, RconError, ValueError):
             pass
-        time.sleep(INDEX_INTERVAL)
+
+    if client.layers.get("signals") and client.scale >= 0.9 and now >= client.due.get("signals", 0):
+        client.due["signals"] = now + SIGNAL_INTERVAL
+        try:
+            client.send("signals", SIGNALS.get(box))
+        except (OSError, RconError, ValueError):
+            pass
+
+    if client.chunk_box and now >= client.due.get("index", 0):
+        client.due["index"] = now + INDEX_VIEW_INTERVAL
+        try:
+            payload = INDEX.get(surface, client.chunk_box)
+            chunks = payload.get("chunks") or []
+            for position in range(0, len(chunks) - 2, 3):
+                WORLD.note_charted(surface, chunks[position], chunks[position + 1], chunks[position + 2])
+            client.send("chunks", payload)
+        except (OSError, RconError, ValueError):
+            pass
+
+    if client.layers.get("pollution") and client.chunk_box and now >= client.due.get("pollution", 0):
+        client.due["pollution"] = now + POLLUTION_INTERVAL
+        try:
+            client.send("pollution", POLLUTION.get(surface, client.chunk_box))
+        except (OSError, RconError, ValueError):
+            pass
+
+
+def scheduler():
+    """Nothing is asked of the game while nobody is watching."""
+    next_state = next_dirty = next_tags = 0.0
+    while True:
+        if HUB.viewers() == 0:
+            time.sleep(0.5)
+            next_state = next_dirty = next_tags = 0.0
+            continue
+
+        now = time.time()
+        if now >= next_state:
+            next_state = now + STATE_INTERVAL
+            poll_state()
+        if now >= next_dirty:
+            next_dirty = now + DIRTY_INTERVAL
+            poll_dirty()
+        if now >= next_tags:
+            next_tags = now + INDEX_INTERVAL
+            poll_tags()
+
+        for client in HUB.snapshot():
+            serve_client_viewport(client, time.time())
+
+        time.sleep(0.05)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -651,6 +874,20 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_file("index.html", "text/html; charset=utf-8")
         elif path == "/state":
             self._send_json(WORLD.get_state())
+        elif path == "/status":
+            with METRICS_LOCK:
+                uptime = max(1e-6, time.time() - METRICS["started"])
+                calls = dict(METRICS["calls"])
+                seconds = dict(METRICS["seconds"])
+            self._send_json({
+                "uptime_seconds": round(uptime, 1),
+                "viewers": HUB.viewers(),
+                "calls": calls,
+                "calls_per_second": {name: round(count / uptime, 3) for name, count in calls.items()},
+                "game_thread_seconds": {name: round(value, 2) for name, value in seconds.items()},
+                "game_thread_share": round(sum(seconds.values()) / uptime, 4),
+                "tiles_cached": len(WORLD.tiles),
+            })
         elif path == "/palette":
             if PALETTE["size"] == 0:  # nothing rendered yet, fetch it once up front
                 try:
@@ -677,8 +914,8 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_region(INDEX, remember=True)
         elif path.startswith("/tile/"):
             self._serve_tile(path)
-        elif path == "/events":
-            self._serve_events()
+        elif path == "/ws":
+            self._serve_websocket()
         else:
             self.send_error(404)
 
@@ -803,30 +1040,62 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_events(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
+    def _serve_websocket(self):
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or "websocket" not in (self.headers.get("Upgrade") or "").lower():
+            return self.send_error(400, "expected a websocket upgrade")
+
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", websocket_accept(key))
         self.end_headers()
-        seen = EVENTS.current()  # a fresh client starts at now, not at the backlog
+
+        client = WebSocketConnection(self.connection)
+        HUB.add(client)
+        # Hand over what is already known so the map is populated immediately.
+        client.send("state", WORLD.get_state(), force=True)
+        client.send("alerts", {"alerts": WORLD.alerts}, force=True)
+        client.send("tags", {"surface": "nauvis", "tags": WORLD.tags.get("nauvis", [])}, force=True)
         try:
-            self.wfile.write(("event: state\ndata: %s\n\n" % json.dumps(WORLD.get_state())).encode())
-            self.wfile.flush()
-            while True:
-                seen, pending = EVENTS.since(seen, timeout=15)
-                if not pending:
-                    self.wfile.write(b": keepalive\n\n")
-                for _, name, payload in pending:
-                    self.wfile.write(("event: %s\ndata: %s\n\n" % (name, payload)).encode())
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
+            while client.open:
+                message = client.read_message()
+                if message is None:
+                    break
+                if not message:
+                    continue
+                try:
+                    request = json.loads(message)
+                except ValueError:
+                    continue
+                if request.get("type") == "viewport":
+                    self._apply_viewport(client, request)
+        except (OSError, WebSocketError):
+            pass
+        finally:
+            HUB.remove(client)
+        self.close_connection = True
+
+    @staticmethod
+    def _apply_viewport(client, request):
+        try:
+            viewport = (int(float(request["x1"])), int(float(request["y1"])),
+                        int(float(request["x2"])), int(float(request["y2"])))
+        except (KeyError, TypeError, ValueError):
             return
+        client.viewport = viewport
+        client.scale = float(request.get("scale") or 1.0)
+        layers = request.get("layers")
+        client.layers = layers if isinstance(layers, dict) else {}
+        chunk_box = request.get("chunks")
+        if isinstance(chunk_box, list) and len(chunk_box) == 4:
+            client.chunk_box = tuple(int(value) for value in chunk_box)
+        # A moved view should answer at once rather than on the next tick.
+        client.due = {}
 
 
 def main():
-    for worker in (state_poller, dirty_poller, index_poller):
-        threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=scheduler, daemon=True).start()
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     server.daemon_threads = True
     server.serve_forever()

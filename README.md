@@ -54,8 +54,8 @@ you would rather have an all-seeing map.
 ## How it works
 
 ```
-save/world/control.lua ──RCON──> bridge.py ──HTTP + SSE──> browser canvas
-   (scenario script)              (stdlib only)             (no dependencies)
+save/world/control.lua ──RCON──> bridge.py ──WebSocket──> browser canvas
+   (scenario script)              (stdlib only)            (no dependencies)
 ```
 
 1. The **scenario script** answers custom commands over RCON. Custom commands,
@@ -65,7 +65,29 @@ save/world/control.lua ──RCON──> bridge.py ──HTTP + SSE──> brows
    those rasters into PNG tiles (hand-rolled encoder over `zlib`), caches them
    per chunk revision, builds zoomed-out tiles from them, and pushes live state
    to browsers over server-sent events.
-3. The **web page** is one HTML file with no build step and no libraries.
+3. The **web page** is one HTML file with no build step and no libraries. It
+   opens a single WebSocket, tells the bridge which rectangle it is looking at
+   and which layers are on, and receives only what changed.
+
+### Load
+
+The bridge asks the game for **nothing at all** while no browser is connected,
+and each connected browser only causes work for the layers it has switched on
+inside the rectangle it is showing. `/status` reports what the game is actually
+being asked to do, including the share of wall time spent inside those calls.
+
+Two things dominated that number before they were fixed, both worth knowing if
+you extend this: searching a viewport for entities costs time proportional to
+the **area**, not to what you find, so a screen-sized search for a handful of
+signals was eating a third of the game thread. Rail signals never move, so they
+are now kept in a per chunk registry and only their state is read. Biters do
+move, but they are only searched for in chunks that are both on screen and
+currently visible. Together that took the game thread share from 50% to 5% with
+a browser open.
+
+Chunk rasters are the heaviest single request, so they are rate limited
+(`CHARTORIO_TILE_RATE`, eight per second by default): panning a map should
+never turn into stutter in the game.
 
 Chunks are only re-rendered when the game reports them changed: build, mine and
 chart events mark a chunk dirty, and the bridge drops that tile and every
@@ -158,6 +180,9 @@ All settings are environment variables on the bridge service.
 | `CHARTORIO_PORT` | `8080` | web port |
 | `CHARTORIO_WEB` | auto | directory holding `index.html` |
 | `CHARTORIO_STATE_INTERVAL` | `0.25` | seconds between player/train polls |
+| `CHARTORIO_UNIT_INTERVAL` | `0.3` | seconds between biter polls, per viewer |
+| `CHARTORIO_SIGNAL_INTERVAL` | `1` | seconds between signal polls, per viewer |
+| `CHARTORIO_TILE_RATE` | `8` | chunk rasters per second, the cap that keeps panning from stuttering the game |
 | `CHARTORIO_DIRTY_INTERVAL` | `2` | seconds between change and alert polls |
 | `CHARTORIO_INDEX_INTERVAL` | `10` | seconds between map tag polls |
 | `CHARTORIO_MAX_ZOOM` | `3` | zoomed-out levels to build |
@@ -169,7 +194,8 @@ All settings are environment variables on the bridge service.
 | path | returns |
 | --- | --- |
 | `/` | the map page |
-| `/events` | server-sent events: `state`, `tiles`, `index`, `tags`, `pollution`, `alerts` |
+| `/ws` | the WebSocket. The browser sends `{type: "viewport", ...}`; the server pushes `state`, `chunks`, `tiles`, `units`, `signals`, `tags`, `pollution` and `alerts` |
+| `/status` | what the game is being asked to do: calls, rate, and game thread share |
 | `/state` | players, trains, tick |
 | `/chunks?surface=&x1=&y1=&x2=&y2=` | charted chunks in a rectangle of **chunk** coordinates, with revisions, tile size and map seed |
 | `/tile/<surface>/<z>/<x>/<y>.png` | a tile; `z` may be omitted for native |
