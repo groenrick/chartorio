@@ -245,6 +245,43 @@ class ViewerCount(unittest.TestCase):
         self.assertTrue(done.wait(5), "add() or remove() deadlocked announcing the count")
 
 
+class SpritePaths(unittest.TestCase):
+    """Sprites are addressed by prototype name. The name is validated rather
+    than joined on and hoped for, so a request cannot walk out of the sprite
+    directory."""
+
+    def setUp(self):
+        self.saved = bridge.SPRITE_DIR
+        bridge.SPRITE_DIR = "/srv/sprites"
+
+    def tearDown(self):
+        bridge.SPRITE_DIR = self.saved
+
+    def test_a_prototype_name_resolves(self):
+        self.assertEqual(bridge.sprite_path("stone-furnace.png"),
+                         os.path.join("/srv/sprites", "stone-furnace.png"))
+
+    def test_underscores_and_digits_are_fine(self):
+        self.assertIsNotNone(bridge.sprite_path("assembling_machine_1.png"))
+
+    def test_traversal_is_refused(self):
+        for name in ("../../etc/passwd.png", "..%2f..%2fetc.png", "a/b.png",
+                     "a\\b.png", "....png", ".png", "sub.dir.png"):
+            self.assertIsNone(bridge.sprite_path(name), name)
+
+    def test_a_non_png_is_refused(self):
+        self.assertIsNone(bridge.sprite_path("stone-furnace.lua"))
+        self.assertIsNone(bridge.sprite_path("stone-furnace"))
+
+    def test_nothing_resolves_when_sprites_are_not_configured(self):
+        bridge.SPRITE_DIR = ""
+        self.assertIsNone(bridge.sprite_path("stone-furnace.png"),
+                          "an unset sprite directory must serve nothing at all")
+
+    def test_an_absurdly_long_name_is_refused(self):
+        self.assertIsNone(bridge.sprite_path("a" * 300 + ".png"))
+
+
 class WorldCharting(unittest.TestCase):
     def setUp(self):
         self.world = bridge.World()

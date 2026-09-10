@@ -197,6 +197,8 @@ All settings are environment variables on the bridge service.
 | `CHARTORIO_INDEX_INTERVAL` | `10` | seconds between map tag polls |
 | `CHARTORIO_MAX_ZOOM` | `3` | zoomed-out levels to build |
 | `CHARTORIO_TILE_CACHE` | `3000` | tiles kept in memory, per cache |
+| `CHARTORIO_SPRITES` | unset | directory of real game sprites; see `render/README.md` |
+| `CHARTORIO_SPRITE_SCALE` | `8` | screen pixels to a world tile before sprites are drawn |
 | `CHARTORIO_FOG` | `strict` | `open` renders uncharted chunks too |
 
 ## HTTP endpoints
