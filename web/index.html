@@ -665,22 +665,64 @@ function packedHighlightColors(row) {
 // Positions arrive a few times a second; drawing them straight would step.
 // Interpolating between the last two updates makes movement continuous without
 // asking the game any more often.
+// Updates do not arrive on a fixed beat: measured gaps ranged from 0.11s to
+// 0.45s. Interpolating against an assumed interval makes a fast train finish
+// its slide early, sit still, then lurch when the next update lands, and the
+// faster the train the bigger the lurch. So measure the real gap, and once the
+// slide is done keep the marker moving with its own speed until the next
+// update arrives.
+const TICKS_PER_SECOND = 60;
+const MAX_EXTRAPOLATION_MS = 700;
+
+function measuredInterval() {
+  return Math.max(80, Math.min(1200, stateInterval));
+}
+
 function interpolationFactor() {
   if (!previousState) return 1;
-  const elapsed = performance.now() - stateArrivedAt;
-  return Math.max(0, Math.min(1, elapsed / stateInterval));
+  return Math.max(0, Math.min(1, (performance.now() - stateArrivedAt) / measuredInterval()));
+}
+
+// speed is tiles per tick and orientation is a full turn expressed as 0..1.
+function velocityOf(entity) {
+  if (!entity || !entity.speed || entity.orientation === undefined) return null;
+  const angle = entity.orientation * Math.PI * 2;
+  const tilesPerSecond = entity.speed * TICKS_PER_SECOND;
+  return { x: Math.sin(angle) * tilesPerSecond, y: -Math.cos(angle) * tilesPerSecond };
 }
 
 function interpolated(entity, previous) {
-  if (!previous) return entity;
-  const factor = interpolationFactor();
-  // A jump this large is a teleport or a respawn, not movement: do not slide.
-  if (Math.abs(entity.x - previous.x) > 64 || Math.abs(entity.y - previous.y) > 64) return entity;
-  return {
-    ...entity,
-    x: previous.x + (entity.x - previous.x) * factor,
-    y: previous.y + (entity.y - previous.y) * factor,
-  };
+  const elapsed = performance.now() - stateArrivedAt;
+  const velocity = velocityOf(entity);
+
+  if (previous) {
+    const stepX = entity.x - previous.x;
+    const stepY = entity.y - previous.y;
+    // Believe a step only if it is roughly what this speed could cover;
+    // anything wilder is a coupling change or a teleport, so do not slide.
+    const reach = velocity
+      ? Math.hypot(velocity.x, velocity.y) * (measuredInterval() / 1000) * 3 + 8
+      : 64;
+    if (Math.hypot(stepX, stepY) <= reach) {
+      const factor = interpolationFactor();
+      const base = {
+        ...entity,
+        x: previous.x + stepX * factor,
+        y: previous.y + stepY * factor,
+      };
+      if (factor < 1 || !velocity) return base;
+      // The slide finished before the next update: carry on at its own speed
+      // rather than freezing in place.
+      const overtime = Math.min(elapsed - measuredInterval(), MAX_EXTRAPOLATION_MS) / 1000;
+      return { ...base, x: base.x + velocity.x * overtime, y: base.y + velocity.y * overtime };
+    }
+  }
+
+  if (velocity) {
+    const ahead = Math.min(elapsed, MAX_EXTRAPOLATION_MS) / 1000;
+    return { ...entity, x: entity.x + velocity.x * ahead, y: entity.y + velocity.y * ahead };
+  }
+  return entity;
 }
 
 function previousPlayer(name) {
@@ -693,6 +735,9 @@ function previousTrain(id) {
 
 function movingEntities() {
   if (unitPairs.length && (performance.now() - unitsArrivedAt) < unitInterval) return true;
+  for (const train of state.trains) {
+    if (train.speed) return true;      // keep animating while anything rolls
+  }
   if (!previousState) return false;
   for (const player of state.players) {
     const before = previousPlayer(player.name);
@@ -1480,8 +1525,13 @@ const CHANNELS = {
   state: (payload) => {
     const next = payload;
     previousState = state.players || state.trains ? state : null;
-    stateInterval = Math.max(80, (next.interval || 0.25) * 1000);
-    stateArrivedAt = performance.now();
+    const now = performance.now();
+    if (stateArrivedAt) {
+      // Smooth the observed gap rather than trusting the advertised interval.
+      const gap = now - stateArrivedAt;
+      if (gap > 30 && gap < 3000) stateInterval = stateInterval * 0.7 + gap * 0.3;
+    }
+    stateArrivedAt = now;
     state = next;
     followTarget();
     renderPanel();

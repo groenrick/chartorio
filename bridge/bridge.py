@@ -30,6 +30,7 @@ STATE_INTERVAL = float(os.environ.get("CHARTORIO_STATE_INTERVAL", "0.25"))
 DIRTY_INTERVAL = float(os.environ.get("CHARTORIO_DIRTY_INTERVAL", "2"))
 INDEX_INTERVAL = float(os.environ.get("CHARTORIO_INDEX_INTERVAL", "10"))
 TILE_CACHE_SIZE = int(os.environ.get("CHARTORIO_TILE_CACHE", "3000"))
+IDLE_STATE_INTERVAL = float(os.environ.get("CHARTORIO_IDLE_STATE_INTERVAL", "1"))
 UNIT_INTERVAL = float(os.environ.get("CHARTORIO_UNIT_INTERVAL", "0.3"))
 SIGNAL_INTERVAL = float(os.environ.get("CHARTORIO_SIGNAL_INTERVAL", "1"))
 INDEX_VIEW_INTERVAL = float(os.environ.get("CHARTORIO_INDEX_VIEW_INTERVAL", "5"))
@@ -901,7 +902,9 @@ def scheduler():
 
         now = time.time()
         if now >= next_state:
-            next_state = now + STATE_INTERVAL
+            # An empty server is paused, so there is nothing to watch move.
+            idle = not (WORLD.get_state().get("players") or WORLD.get_state().get("trains"))
+            next_state = now + (IDLE_STATE_INTERVAL if idle else STATE_INTERVAL)
             poll_state()
         if now >= next_dirty:
             next_dirty = now + DIRTY_INTERVAL
@@ -1066,6 +1069,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(404, "zoom out of range")
 
         try:
+            signature = tile_signature(surface, zoom, tile_x, tile_y)
+            if signature is None:
+                return self.send_error(404, "nothing charted here")
+            # A browser that already holds this exact tile only needs to hear so.
+            if self.headers.get("If-None-Match") == '"%s"' % signature:
+                self.send_response(304)
+                self.send_header("ETag", '"%s"' % signature)
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                return
             signature, png = render_tile(surface, zoom, tile_x, tile_y)
         except (OSError, RconError, ValueError, KeyError) as error:
             return self.send_error(503, "chunk render failed: %s" % error)

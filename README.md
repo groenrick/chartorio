@@ -30,8 +30,9 @@ the ragged edge where the charted area stops.*
   reserved, blocked, and the four chain signal states. Round for a plain
   signal, diamond for a chain signal
 - **Players and trains** live, with train colour by state and click-to-follow.
-  Positions arrive four times a second and the page interpolates between them,
-  so movement is smooth without polling the game harder
+  Positions arrive four times a second; the page measures the real gap between
+  updates and carries a train on with its own speed and heading until the next
+  one lands, so a fast train moves smoothly instead of lurching
 - **Pollution** as a heat overlay, one value per chunk
 - **Map tags** you placed in game, with their text
 - **Alerts** — anything the player force loses, as a fading marker plus a feed
@@ -90,7 +91,10 @@ a browser open.
 
 Chunk rasters are the heaviest single request, so they are rate limited
 (`CHARTORIO_TILE_RATE`, eight per second by default): panning a map should
-never turn into stutter in the game.
+never turn into stutter in the game. Tiles carry an ETag, so a browser that
+already holds one gets a 304 rather than the image again, and an empty server
+is polled once a second instead of four times, since a paused game has nothing
+moving to watch.
 
 Chunks are only re-rendered when the game reports them changed: build, mine and
 chart events mark a chunk dirty, and the bridge drops that tile and every
@@ -183,6 +187,7 @@ All settings are environment variables on the bridge service.
 | `CHARTORIO_PORT` | `8080` | web port |
 | `CHARTORIO_WEB` | auto | directory holding `index.html` |
 | `CHARTORIO_STATE_INTERVAL` | `0.25` | seconds between player/train polls |
+| `CHARTORIO_IDLE_STATE_INTERVAL` | `1` | seconds between those polls while nobody is in the game |
 | `CHARTORIO_UNIT_INTERVAL` | `0.3` | seconds between biter polls, per viewer |
 | `CHARTORIO_SIGNAL_INTERVAL` | `1` | seconds between signal polls, per viewer |
 | `CHARTORIO_TILE_RATE` | `8` | chunk rasters per second, the cap that keeps panning from stuttering the game |

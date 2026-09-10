@@ -384,25 +384,8 @@ end
 -- current vision. The chunk list changes slowly, so it is cached.
 -- ---------------------------------------------------------------------------
 
-local VISIBILITY_REFRESH_TICKS = 300
 local UNIT_LIMIT = 600
 local MAX_QUERY_TILES = 512
-
-local function visible_lookup(surface, force)
-  storage.chartorio.visible = storage.chartorio.visible or {}
-  local cached = storage.chartorio.visible[surface.name]
-  if cached and (game.tick - cached.tick) < VISIBILITY_REFRESH_TICKS then
-    return cached.chunks
-  end
-  local chunks = {}
-  for chunk in surface.get_chunks() do
-    if force.is_chunk_visible(surface, {chunk.x, chunk.y}) then
-      chunks[chunk.x .. ":" .. chunk.y] = true
-    end
-  end
-  storage.chartorio.visible[surface.name] = {tick = game.tick, chunks = chunks}
-  return chunks
-end
 
 -- ---------------------------------------------------------------------------
 -- Live entities
@@ -587,13 +570,16 @@ commands.add_command("chartorio_units", "Visible biters in a viewport: chartorio
   -- Only chunks that are both on screen and currently seen are worth looking
   -- at. Searching the whole viewport instead meant scanning a quarter of a
   -- million tiles for a handful of biters.
-  local visible = visible_lookup(surface, game.forces.player)
+  local force = game.forces.player
   local points = {}
   local truncated = false
   local scanned = 0
   for chunk_y = math.floor(y1 / CHUNK_SIZE), math.floor(y2 / CHUNK_SIZE) do
     for chunk_x = math.floor(x1 / CHUNK_SIZE), math.floor(x2 / CHUNK_SIZE) do
-      if visible[chunk_x .. ":" .. chunk_y] then
+      -- Asked per chunk in view. Building a visibility set for the whole
+      -- surface meant walking every generated chunk a few times a minute,
+      -- which is the same world wide scan that made the map expensive before.
+      if force.is_chunk_visible(surface, {chunk_x, chunk_y}) then
         scanned = scanned + 1
         local area = {
           {chunk_x * CHUNK_SIZE, chunk_y * CHUNK_SIZE},
