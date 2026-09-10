@@ -997,12 +997,23 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
              and kind ~= "fluid-wagon" and kind ~= "artillery-wagon"
              and kind ~= "item-entity" and kind ~= "particle-source" then
             local position = entity.position
-            entities[#entities + 1] = {
+            local record = {
               n = entity.name,
               x = math.floor(position.x * 8) / 8,
               y = math.floor(position.y * 8) / 8,
               d = entity.direction or 0,
             }
+            -- A tree picks one of a dozen variations, and without it every
+            -- tree in the world is drawn as the same one. A belt's curve is
+            -- decided by its neighbours, not its direction, so a corner drawn
+            -- from direction alone points the wrong way. Both are read through
+            -- pcall: neither is guaranteed on every entity, and an uncaught
+            -- error in a command takes the server down, not the command.
+            local ok, variation = pcall(function() return entity.graphics_variation end)
+            if ok and variation and variation > 1 then record.v = variation end
+            local shaped, shape = pcall(function() return entity.belt_shape end)
+            if shaped and shape and shape ~= "straight" then record.s = shape end
+            entities[#entities + 1] = record
           end
         end
       end

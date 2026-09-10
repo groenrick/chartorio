@@ -734,6 +734,16 @@ function previousTrain(id) {
   return previousState && previousState.trains.find((train) => train.id === id);
 }
 
+function spritesAnimating() {
+  // Belts move, so the sprite layer needs a frame even when nothing else does.
+  if (!spritesWanted() || !spriteIndex) return false;
+  for (const entity of spriteEntities) {
+    const meta = spriteIndex[entity.n];
+    if (meta && meta.kind === "belt") return true;
+  }
+  return false;
+}
+
 function movingEntities() {
   if (unitPairs.length && (performance.now() - unitsArrivedAt) < unitInterval) return true;
   for (const train of state.trains) {
@@ -754,7 +764,7 @@ function movingEntities() {
 // Only run a continuous loop while something actually moves, so an idle map
 // costs nothing.
 function animate() {
-  if (!movingEntities() || interpolationFactor() >= 1) {
+  if ((!movingEntities() || interpolationFactor() >= 1) && !spritesAnimating()) {
     animating = false;
     draw();
     return;
@@ -1072,31 +1082,86 @@ function requestSprites() {
     .then((response) => response.json())
     .then((payload) => {
       spriteEntities = Array.isArray(payload.entities) ? payload.entities : [];
-      requestDraw();
+      // Belts animate, so entering the sprite layer has to start the frame
+      // loop; otherwise the first frame is drawn and nothing moves.
+      if (!animating) animate(); else requestDraw();
     })
     .catch(() => {});
 }
 
+// A belt sheet is a grid of animation frames by belt orientation, and the
+// orientation is not the entity's direction: twenty rows cover four straight
+// runs, eight curves and eight sideloads. These are Factorio's own indices,
+// read off base/prototypes/entity/transport-belts.lua, and they are ordered
+// east, west, north, south rather than starting at north.
+const BELT_STRAIGHT = { 4: 1, 12: 2, 0: 3, 8: 4 };   // entity direction -> row index
+// A curve is decided by a belt's neighbours, not its own direction, so the
+// game reports the shape separately. "left" means the belt is fed from its
+// left hand side.
+const BELT_CURVE = {
+  0:  { left: 7,  right: 5  },   // to north: from west, from east
+  4:  { left: 6,  right: 9  },   // to east:  from north, from south
+  8:  { left: 10, right: 12 },   // to south: from east, from west
+  12: { left: 11, right: 8  },   // to west:  from south, from north
+};
+
+function beltRow(entity) {
+  const curve = BELT_CURVE[entity.d];
+  if (entity.s && curve && curve[entity.s]) return curve[entity.s] - 1;
+  return (BELT_STRAIGHT[entity.d] || 3) - 1;     // indices are 1 based
+}
+
+function spriteLayers(meta, entity) {
+  if (meta.kind === "variations") {
+    // graphics_variation is 1 based and only sent when it is not the first.
+    const index = ((entity.v || 1) - 1) % meta.variations.length;
+    return meta.variations[index];
+  }
+  return meta.layers || [];
+}
+
+function drawOneLayer(layer, entity, meta, now) {
+  const image = spriteImage(layer.file);
+  if (!image.complete || image.failed || !image.naturalWidth) return;
+
+  let sourceX = layer.x || 0;
+  let sourceY = layer.y || 0;
+  if (meta.kind === "belt") {
+    const frames = layer.frames || 1;
+    // Frames advance with the belt's own speed, so a fast belt visibly runs
+    // faster than a yellow one. Factorio moves a belt `speed` tiles a tick at
+    // 60 ticks a second, and the sheet is one full cycle.
+    const rate = (meta.speed || 0.03125) * 60 * (meta.speed_coefficient || 1);
+    const frame = Math.floor(now * rate) % frames;
+    sourceX = frame * layer.width;
+    sourceY = beltRow(entity) * layer.height;
+  }
+
+  const tilesWide = layer.width * layer.scale / SPRITE_PIXELS_PER_TILE;
+  const tilesHigh = layer.height * layer.scale / SPRITE_PIXELS_PER_TILE;
+  const centre = worldToScreen(entity.x + (layer.shift[0] || 0),
+                               entity.y + (layer.shift[1] || 0));
+  const width = tilesWide * view.scale;
+  const height = tilesHigh * view.scale;
+  try {
+    context.drawImage(image, sourceX, sourceY, layer.width, layer.height,
+                      centre.x - width / 2, centre.y - height / 2, width, height);
+  } catch (error) {
+    image.failed = true;                       // a bad crop must not kill the frame
+  }
+}
+
 function drawSprites() {
   if (!spritesWanted() || !spriteIndex) return;
-  for (const entity of spriteEntities) {
+  const now = performance.now() / 1000;
+  // Painted back to front, so a tree's leaves land over its own trunk and a
+  // building to the south overlaps the one behind it the way the game draws it.
+  const ordered = spriteEntities.slice().sort((a, b) => a.y - b.y);
+  for (const entity of ordered) {
     const meta = spriteIndex[entity.n];
     if (!meta) continue;                       // no art: the colour tile stands
-    const image = spriteImage(meta.file);
-    if (!image.complete || image.failed || !image.naturalWidth) continue;
-
-    const tilesWide = meta.width * meta.scale / SPRITE_PIXELS_PER_TILE;
-    const tilesHigh = meta.height * meta.scale / SPRITE_PIXELS_PER_TILE;
-    const centre = worldToScreen(entity.x + (meta.shift[0] || 0),
-                                 entity.y + (meta.shift[1] || 0));
-    const width = tilesWide * view.scale;
-    const height = tilesHigh * view.scale;
-    try {
-      context.drawImage(image,
-        meta.x || 0, meta.y || 0, meta.width, meta.height,
-        centre.x - width / 2, centre.y - height / 2, width, height);
-    } catch (error) {
-      image.failed = true;                     // a bad crop must not kill the frame
+    for (const layer of spriteLayers(meta, entity)) {
+      drawOneLayer(layer, entity, meta, now);
     }
   }
 }

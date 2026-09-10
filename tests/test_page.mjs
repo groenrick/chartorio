@@ -114,7 +114,7 @@ function boot() {
   // the context the way `function` and `var` do, so the few the tests need are
   // handed out by an epilogue running in the same scope.
   const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES, layers,"
-              + " SPRITE_PIXELS_PER_TILE, spritesWanted,"
+              + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers,"
               + " __setSpritesAvailable(v) { spritesAvailable = v; },"
               + " get transport() { return transport; } };";
   vm.runInContext(extractScript(html) + probe, context, { filename: "index.html" });
@@ -234,6 +234,66 @@ test("turning the terrain layer off takes its sprites with it", () => {
   page.view.scale = 24;
   page.layers.terrain = false;
   assert.equal(page.spritesWanted(), false);
+});
+
+test("a straight belt picks the row Factorio uses for its direction", () => {
+  // From base/prototypes/entity/transport-belts.lua the indices are ordered
+  // east=1, west=2, north=3, south=4 — not north first — and they are 1 based,
+  // so the row is one less. Getting this wrong points every belt the wrong way.
+  const page = boot();
+  assert.equal(page.beltRow({ d: 4 }), 0, "east");
+  assert.equal(page.beltRow({ d: 12 }), 1, "west");
+  assert.equal(page.beltRow({ d: 0 }), 2, "north");
+  assert.equal(page.beltRow({ d: 8 }), 3, "south");
+});
+
+test("a curved belt uses the row for where it is fed from", () => {
+  // A curve is decided by neighbours, not by the belt's own direction, so the
+  // shape arrives separately. west_to_north is index 7, east_to_north is 5.
+  const page = boot();
+  assert.equal(page.beltRow({ d: 0, s: "left" }), 6, "to north, fed from west");
+  assert.equal(page.beltRow({ d: 0, s: "right" }), 4, "to north, fed from east");
+  assert.equal(page.beltRow({ d: 8, s: "left" }), 9, "to south, fed from east");
+  assert.equal(page.beltRow({ d: 12, s: "right" }), 7, "to west, fed from north");
+});
+
+test("every belt row lands inside the twenty on the sheet", () => {
+  const page = boot();
+  for (const d of [0, 4, 8, 12]) {
+    for (const s of [undefined, "left", "right"]) {
+      const row = page.beltRow({ d, s });
+      assert.ok(row >= 0 && row < 20, `direction ${d} shape ${s} gave row ${row}`);
+    }
+  }
+});
+
+test("an unknown belt direction still draws something", () => {
+  // Diagonals should not happen on a belt, but a bad row would crop off the
+  // sheet and throw away the frame.
+  const page = boot();
+  const row = page.beltRow({ d: 6 });
+  assert.ok(row >= 0 && row < 20);
+});
+
+test("a tree draws the variation the game gave it, trunk and leaves", () => {
+  const page = boot();
+  const meta = { kind: "variations", variations: [["a-trunk", "a-leaves"], ["b-trunk", "b-leaves"], ["c-trunk", "c-leaves"]] };
+  assert.deepEqual(page.spriteLayers(meta, { v: 2 }), ["b-trunk", "b-leaves"]);
+  assert.deepEqual(page.spriteLayers(meta, { v: 3 }), ["c-trunk", "c-leaves"]);
+});
+
+test("a tree with no variation reported falls back to the first", () => {
+  // The scenario only sends `v` when it is not 1, to keep the payload small.
+  const page = boot();
+  const meta = { kind: "variations", variations: [["a-trunk"], ["b-trunk"]] };
+  assert.deepEqual(page.spriteLayers(meta, {}), ["a-trunk"]);
+});
+
+test("a variation beyond what was extracted wraps instead of vanishing", () => {
+  const page = boot();
+  const meta = { kind: "variations", variations: [["a"], ["b"]] };
+  assert.deepEqual(page.spriteLayers(meta, { v: 5 }), ["a"],
+                   "a tree must still be drawn if fewer variations were extracted");
 });
 
 test("ore totals read the way the game writes them", () => {
