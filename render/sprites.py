@@ -108,8 +108,63 @@ def sprite_for(prototype):
     for path in PICTURE_PATHS:
         layer = first_layer(dig(prototype, path))
         if layer:
+            # A belt sheet is a grid of frames by belt orientation, and the
+            # orientation is not the entity's direction: there are twenty rows
+            # covering four straight runs, eight curves and eight sideloads.
+            if path[0] == "belt_animation_set":
+                layer = dict(layer, chartorio_kind="belt")
             return layer
     return None
+
+
+def layer_info(node):
+    """One drawable layer, normalised. None when the node is not one."""
+    if not isinstance(node, dict) or not node.get("filename"):
+        return None
+    if node.get("draw_as_shadow") or node.get("draw_as_glow") or node.get("draw_as_light"):
+        return None
+    size = node.get("size")
+    width, height = node.get("width"), node.get("height")
+    if isinstance(size, list) and len(size) == 2:
+        width, height = size
+    elif isinstance(size, int):
+        width = height = size
+    if not width or not height:
+        return None
+    shift = node.get("shift") or [0, 0]
+    if isinstance(shift, dict):
+        shift = [shift.get("x", 0), shift.get("y", 0)]
+    return {
+        "filename": node["filename"],
+        "width": width,
+        "height": height,
+        "scale": node.get("scale", 1),
+        "shift": shift,
+        "x": node.get("x", 0),
+        "y": node.get("y", 0),
+        "frames": node.get("frame_count", 1),
+        "line_length": node.get("line_length", 0),
+        "directions": node.get("direction_count", 1),
+    }
+
+
+def tree_variations(prototype):
+    """Trees carry a dozen variations, each its own trunk and leaves files, and
+    an entity picks one with `graphics_variation`. Taking the first variation's
+    trunk — which is what happened at first — draws every tree in the world as
+    the same bare stump."""
+    variations = prototype.get("variations")
+    if not isinstance(variations, list) or not variations:
+        return None
+    out = []
+    for variation in variations:
+        if not isinstance(variation, dict):
+            continue
+        layers = [layer_info(variation.get(part)) for part in ("trunk", "leaves")]
+        layers = [layer for layer in layers if layer]
+        if layers:
+            out.append(layers)
+    return out or None
 
 
 def resolve(filename, data_dir):
@@ -175,36 +230,54 @@ def main():
                 continue
             if wanted is not None and name not in wanted:
                 continue
-            layer = sprite_for(prototype)
-            if not layer:
+            def take(layer):
+                """Copy a layer's sheet and return it with a served filename."""
+                source = resolve(layer["filename"], data_dir)
+                if not source or not os.path.isfile(source):
+                    return None
+                if source not in copied:
+                    target = os.path.basename(source)
+                    # Two prototypes can name the same file; keep them apart.
+                    while target in copied.values():
+                        target = "_" + target
+                    shutil.copy2(source, os.path.join(args.out, target))
+                    copied[source] = target
+                served = dict(layer)
+                served.pop("filename")
+                served["file"] = copied[source]
+                return served
+
+            entry = None
+            variations = tree_variations(prototype) if category == "tree" else None
+            if variations:
+                taken = []
+                for layers in variations:
+                    served = [take(layer) for layer in layers]
+                    served = [layer for layer in served if layer]
+                    if served:
+                        taken.append(served)
+                if taken:
+                    entry = {"kind": "variations", "variations": taken}
+            else:
+                layer = sprite_for(prototype)
+                info = layer_info(layer) if layer else None
+                served = take(info) if info else None
+                if served:
+                    entry = {"kind": layer.get("chartorio_kind", "static"),
+                             "layers": [served]}
+                    if entry["kind"] == "belt":
+                        # Frames advance with the belt's own speed, so a fast
+                        # belt visibly runs faster than a yellow one.
+                        entry["speed"] = prototype.get("speed", 0.03125)
+                        entry["speed_coefficient"] = prototype.get(
+                            "animation_speed_coefficient", 1)
+
+            if not entry:
                 if wanted is not None:
                     skipped.add(name)
                 continue
-            source = resolve(layer["filename"], data_dir)
-            if not source or not os.path.isfile(source):
-                skipped.add(name)
-                continue
-
-            target_name = name + ".png"
-            if source not in copied:
-                shutil.copy2(source, os.path.join(args.out, target_name))
-                copied[source] = target_name
-            shift = layer.get("shift") or [0, 0]
-            if isinstance(shift, dict):
-                shift = [shift.get("x", 0), shift.get("y", 0)]
-            index[name] = {
-                "file": copied[source],
-                "width": layer["width"],
-                "height": layer["height"],
-                "scale": layer.get("scale", 1),
-                "shift": shift,
-                "category": category,
-                # A sheet holds animation frames; the browser draws the first.
-                "frames": layer.get("frame_count", 1),
-                "line_length": layer.get("line_length", 0),
-                "x": layer.get("x", 0),
-                "y": layer.get("y", 0),
-            }
+            entry["category"] = category
+            index[name] = entry
 
     with open(os.path.join(args.out, "index.json"), "w") as handle:
         json.dump({"version": 1, "pixels_per_tile": 32, "sprites": index}, handle, indent=1)
