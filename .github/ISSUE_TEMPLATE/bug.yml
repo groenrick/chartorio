@@ -1,0 +1,107 @@
+name: Bug report
+description: Something the map does wrong, or stops doing.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Chartorio is three parts that fail in different ways: a scenario script
+        inside the save, a bridge next to the server, and one HTML page in the
+        browser. The questions below are the ones that decide which.
+
+  - type: checkboxes
+    id: server-died
+    attributes:
+      label: Did the Factorio server itself go down?
+      description: An uncaught error in a command takes the whole server to `Failed`, not just the command. If that happened, say so here and this gets looked at first.
+      options:
+        - label: The server stopped or went to `Failed` when this happened
+          required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+      placeholder: |
+        Rails render as staircases when zoomed out past level 2. Expected them
+        to stay continuous the way they do at zoom 0.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: The smallest set of steps that shows it. Say whether it happens every time or occasionally.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: part
+    attributes:
+      label: Which part
+      description: A guess is fine, and so is "not sure".
+      options:
+        - Not sure
+        - The map in the browser (web/index.html)
+        - The bridge (bridge/bridge.py)
+        - The game side (scenario/control.lua)
+        - Install or patching a save (install.sh, tools/)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      description: The page uses a websocket and falls back to `/events` when a network refuses the upgrade. Which one you are on changes where to look. The page reports it; if you cannot tell, pick "not sure".
+      options:
+        - Not sure
+        - WebSocket
+        - Event stream (/events)
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Factorio and Python versions
+      description: The API moved in Factorio 2.0, and the bridge is standard library only, so the Python version matters.
+      placeholder: "Factorio 2.0.28 headless, Python 3.11.2"
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      placeholder: "Firefox 133 on Linux"
+    validations:
+      required: false
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of /status
+      description: "`curl http://your-server:8080/status`. It reports what the game is being asked to do: calls, rate, and the share of wall time spent inside them. For anything that looks like slowness or stutter, this is the first thing worth having."
+      render: json
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Any CHARTORIO_ settings you changed
+      description: Defaults are in the README. `CHARTORIO_FOG=open` in particular changes what is rendered at all.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Errors from the bridge log or the browser console
+      render: text
+    validations:
+      required: false
