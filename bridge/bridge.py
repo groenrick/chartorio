@@ -1027,6 +1027,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_error(404)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        # Without this a browser keeps an old page across a redeploy, which
+        # shows up as a client still polling endpoints the new page dropped.
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
