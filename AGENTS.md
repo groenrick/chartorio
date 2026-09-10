@@ -140,6 +140,22 @@ issue is opened, not when the pull request is reviewed.
 Do not ask an outside reporter for constraints they cannot know. Take what
 their form gives and write the shaped issue yourself.
 
+## Never commit to main
+
+Work on a branch and open a pull request, always, including for a one word
+change and including your own work. `main` is protected on GitHub: it takes no
+direct push from anyone outside the admin, no force push and no deletion, and
+both CI jobs have to be green before a merge.
+
+The admin can still push straight to `main`, because a locked out maintainer
+with a broken deployment is worse than a bypassed rule. That escape hatch is
+for a hotfix, not for ordinary work. Use a pull request.
+
+The reason is not ceremony. This repository force pushed over a commit and
+carried a mistyped WebSocket handshake for a day without noticing, and the
+review a pull request forces is where both of those get caught. A branch also
+means CI has somewhere to fail that is not `main`.
+
 ## Commits
 
 Conventional Commits, `type(scope): subject`.
