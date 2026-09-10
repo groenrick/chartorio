@@ -423,6 +423,7 @@ class World:
         self.index = {}          # surface -> {"size": px, "chunks": [[x, y, revision], ...]}
         self.revisions = {}      # surface -> {(x, y): revision} for fast lookups
         self.tiles = OrderedDict()  # (surface, zoom, x, y) -> (signature, RGBA pixels)
+        self.rasters = OrderedDict()  # (surface, x, y) -> (revision, chunk payload)
         self.pngs = OrderedDict()   # (surface, zoom, x, y) -> (signature, png bytes)
         self.tags = {}           # surface -> [tag, ...]
         self.pollution = {}      # surface -> {"peak": n, "chunks": [x, y, amount, ...]}
@@ -461,6 +462,23 @@ class World:
         """A chunk reported dirty is charted, even if the index has not caught up."""
         with self.lock:
             self.revisions.setdefault(surface, {})[(chunk_x, chunk_y)] = revision
+
+    def get_raster(self, key, revision):
+        """The chunk's palette indices, as the game gave them. Shared by the
+        colour tiles and the terrain sprites so the game is asked once."""
+        with self.lock:
+            entry = self.rasters.get(key)
+            if entry is not None and entry[0] == revision:
+                self.rasters.move_to_end(key)
+                return entry[1]
+            return None
+
+    def put_raster(self, key, revision, payload):
+        with self.lock:
+            self.rasters[key] = (revision, payload)
+            self.rasters.move_to_end(key)
+            while len(self.rasters) > TILE_CACHE_SIZE:
+                self.rasters.popitem(last=False)
 
     def get_tile(self, key):
         with self.lock:
@@ -665,7 +683,8 @@ def encode_png(width, height, pixels, channels=4):
             + chunk(b"IEND", b""))
 
 
-PALETTE = {"size": 0, "colors": {0: (26, 22, 18)}, "keys": {}, "structure": set()}
+PALETTE = {"size": 0, "colors": {0: (26, 22, 18)}, "keys": {}, "names": {},
+           "structure": set()}
 PALETTE_LOCK = threading.Lock()
 
 
@@ -677,13 +696,18 @@ def refresh_palette(expected_size):
         payload = call("/chartorio_palette")
         colors = {0: (26, 22, 18)}
         keys = {}
+        names = {}
         for entry in payload.get("colors", []):
             color = entry.get("color")
             if color:
                 colors[entry["index"]] = tuple(color)
                 keys[entry["key"]] = list(color)
+                # The other direction as well: the terrain sprite layer needs
+                # to know which tile an index is, not what colour it became.
+                names[str(entry["index"])] = entry["key"]
         PALETTE["colors"] = colors
         PALETTE["keys"] = keys
+        PALETTE["names"] = names
         PALETTE["size"] = len(payload.get("colors", []))
         # Entity colours, as raw RGB triples, so zooming out can keep thin
         # structures such as rails instead of averaging them away.
@@ -718,12 +742,28 @@ class RateLimiter:
 TILE_LIMITER = RateLimiter(TILE_RENDERS_PER_SECOND)
 
 
-def render_leaf(surface, chunk_x, chunk_y):
-    """One chunk, straight from the game, as RGBA pixels."""
+def chunk_runs(surface, chunk_x, chunk_y):
+    """The chunk's run length coded palette indices, cached against the chunk's
+    revision. Both the colour tiles and the terrain sprites read this, so a
+    chunk is only ever rastered once per change."""
+    key = (surface, chunk_x, chunk_y)
+    revision = chunk_revision(surface, chunk_x, chunk_y)
+    if revision is None:
+        raise RconError("nothing charted here")
+    cached = WORLD.get_raster(key, revision)
+    if cached is not None:
+        return cached
     TILE_LIMITER.wait()
     payload = call("/chartorio_chunk %s %d %d" % (surface, chunk_x, chunk_y))
     if "runs" not in payload:
         raise RconError(payload.get("error", "malformed chunk response"))
+    WORLD.put_raster(key, revision, payload)
+    return payload
+
+
+def render_leaf(surface, chunk_x, chunk_y):
+    """One chunk, straight from the game, as RGBA pixels."""
+    payload = chunk_runs(surface, chunk_x, chunk_y)
     colors = refresh_palette(payload.get("palette_size", 0))
     size = payload["size"]
     fallback = colors[0]
@@ -1003,6 +1043,8 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_resource()
         elif path == "/signals":
             self._serve_viewport(SIGNALS, "signals")
+        elif path == "/raster":
+            self._serve_raster()
         elif path == "/entities":
             if not SPRITE_DIR:
                 return self._send_json({"entities": [], "sprites": False})
@@ -1071,6 +1113,36 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(RESOURCES.get(surface, x, y))
         except (OSError, RconError, ValueError) as error:
             self._send_json({"found": False, "error": str(error)})
+
+    def _serve_raster(self):
+        """One chunk's tile identity, for the terrain sprite layer. The runs
+        carry palette indices and the palette maps those to `t:<name>`, so the
+        page can draw a tile sprite per position instead of a coloured square."""
+        query = self._query()
+        try:
+            surface = query.get("surface", "nauvis")
+            chunk_x = int(float(query["x"]))
+            chunk_y = int(float(query["y"]))
+        except (KeyError, ValueError):
+            return self.send_error(400, "raster needs x and y")
+        try:
+            payload = chunk_runs(surface, chunk_x, chunk_y)
+        except RconError as error:
+            return self.send_error(404, str(error))
+        except (OSError, ValueError) as error:
+            return self._send_json({"error": str(error)})
+        refresh_palette(payload.get("palette_size", 0))
+        with PALETTE_LOCK:
+            # Only the tile names matter here: an index that is an entity is
+            # drawn by the entity sprite layer, from live positions.
+            names = {index: key for index, key in PALETTE["names"].items()
+                     if key.startswith("t:")}
+        self._send_json({
+            "surface": surface, "x": chunk_x, "y": chunk_y,
+            "size": payload.get("size"),
+            "runs": payload.get("runs", []),
+            "names": names,
+        })
 
     def _serve_sprite_index(self):
         """What the page needs to draw each prototype, plus the zoom at which

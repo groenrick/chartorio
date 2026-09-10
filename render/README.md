@@ -77,3 +77,32 @@ otherwise appear twice, a few hundred milliseconds apart.
 
 A prototype with no extracted sprite is not an error. The colour tile
 underneath simply stands, so a partial extract degrades instead of breaking.
+
+## Terrain
+
+The same extract carries the base texture for every tile the world has — nine
+of them on the live server. Terrain is drawn from the chunk raster the bridge
+already fetches: `chartorio_chunk` returns palette indices, and the palette
+maps an index back to `t:<name>`, so the tile identity is already there and
+`render_leaf` was only discarding it on the way to a PNG. `/raster` hands the
+page the same payload, cached against the chunk's revision so the game is
+asked once per change however many layers want it.
+
+Each tile is drawn per world tile into an offscreen canvas per chunk, because a
+screenful at eight pixels to a tile is around a hundred thousand tiles and a
+`drawImage` each would not survive a frame. Terrain only changes when the chunk
+does, so a canvas is kept until the revision moves.
+
+Two known limits:
+
+- **Transitions are not drawn.** Factorio blends tile types with transition
+  sprites chosen from the eight neighbours; without them a shoreline has square
+  corners. This is the largest remaining piece of the terrain work.
+- **Water is a shader effect.** The prototype carries `effect = "water"` with
+  two effect colours and `water1.png` is 512x64; the shimmer is done on the
+  GPU. What is drawn here is the static texture, which reads flat next to the
+  game.
+
+Tile variants are picked by a position hash rather than Factorio's own, which
+it does not publish, so ground looks right but will not match the game tile for
+tile.
