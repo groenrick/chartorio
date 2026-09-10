@@ -225,37 +225,93 @@ local RAIL_TYPES = {
   ["rail-ramp"] = true,
 }
 
-local function paint_rail(cells, size, origin_x, origin_y, entity, index)
+local function direction_vector(direction)
   -- Factorio 2.0 counts sixteen directions, so one step is a sixteenth turn.
-  local angle = (entity.direction or 0) * math.pi / 8
-  local step_x, step_y = math.sin(angle), -math.cos(angle)
-  local box = entity.selection_box or entity.bounding_box
-  local length = math.max(
-    box.right_bottom.x - box.left_top.x,
-    box.right_bottom.y - box.left_top.y)
-  if length <= 0 then length = 2 end
+  local angle = (direction or 0) * math.pi / 8
+  return math.sin(angle), -math.cos(angle)
+end
 
-  local position = entity.position
-  -- Step in half cells and stamp a two by two block. A single cell per step
-  -- leaves diagonal runs touching only at their corners, which reads as a
-  -- dotted line; overlapping blocks keep the track solid at any angle.
-  local samples = math.ceil(length * SUBPIXELS * 2)
+-- The ends of a rail, in world coordinates, with the direction of travel there.
+-- Guarded: an uncaught error inside a command takes the server down with it.
+local function rail_ends(entity)
+  local ok, ends = pcall(function()
+    local front = entity.get_rail_end(defines.rail_direction.front).location
+    local back = entity.get_rail_end(defines.rail_direction.back).location
+    return {
+      {x = front.position.x, y = front.position.y, direction = front.direction},
+      {x = back.position.x, y = back.position.y, direction = back.direction},
+    }
+  end)
+  if ok and ends and ends[1] and ends[2] then return ends end
+  return nil
+end
 
-  for sample = 0, samples do
-    local along = -length / 2 + length * sample / samples
-    local cell_x = math.floor((position.x + step_x * along - origin_x) * SUBPIXELS)
-    local cell_y = math.floor((position.y + step_y * along - origin_y) * SUBPIXELS)
-    for offset_y = 0, 1 do
-      for offset_x = 0, 1 do
-        local x = cell_x + offset_x
-        local y = cell_y + offset_y
-        if x >= 0 and y >= 0 and x < size and y < size then
-          cells[y * size + x + 1] = index
-        end
+local function stamp(cells, size, origin_x, origin_y, world_x, world_y, index)
+  -- Two by two, so consecutive steps overlap and a diagonal run stays solid
+  -- instead of touching only at its corners.
+  local cell_x = math.floor((world_x - origin_x) * SUBPIXELS)
+  local cell_y = math.floor((world_y - origin_y) * SUBPIXELS)
+  for offset_y = 0, 1 do
+    for offset_x = 0, 1 do
+      local x, y = cell_x + offset_x, cell_y + offset_y
+      if x >= 0 and y >= 0 and x < size and y < size then
+        cells[y * size + x + 1] = index
       end
     end
   end
 end
+
+-- Draw the track between its real ends. Straight rails come out straight
+-- because their tangents are parallel; a curve bends through the point where
+-- its two end tangents meet, which is the arc's control point.
+local function paint_rail(cells, size, origin_x, origin_y, entity, index)
+  local ends = rail_ends(entity)
+  if not ends then
+    -- Older or unexpected rail types: fall back to a line through the centre.
+    local step_x, step_y = direction_vector(entity.direction)
+    local box = entity.selection_box or entity.bounding_box
+    local length = math.max(
+      box.right_bottom.x - box.left_top.x,
+      box.right_bottom.y - box.left_top.y)
+    if length <= 0 then length = 2 end
+    local position = entity.position
+    local samples = math.ceil(length * SUBPIXELS * 2)
+    for sample = 0, samples do
+      local along = -length / 2 + length * sample / samples
+      stamp(cells, size, origin_x, origin_y,
+            position.x + step_x * along, position.y + step_y * along, index)
+    end
+    return
+  end
+
+  local ax, ay = ends[1].x, ends[1].y
+  local bx, by = ends[2].x, ends[2].y
+  local a_dx, a_dy = direction_vector(ends[1].direction)
+  local b_dx, b_dy = direction_vector(ends[2].direction)
+
+  local control_x, control_y = (ax + bx) / 2, (ay + by) / 2
+  local denominator = a_dx * b_dy - a_dy * b_dx
+  if math.abs(denominator) > 0.0001 then
+    local along = ((bx - ax) * b_dy - (by - ay) * b_dx) / denominator
+    local candidate_x, candidate_y = ax + a_dx * along, ay + a_dy * along
+    -- Near parallel tangents put the meeting point far away; keep the chord.
+    local span = math.max(math.abs(bx - ax), math.abs(by - ay)) + 2
+    if math.abs(candidate_x - ax) <= span * 2 and math.abs(candidate_y - ay) <= span * 2 then
+      control_x, control_y = candidate_x, candidate_y
+    end
+  end
+
+  local chord = math.max(math.abs(bx - ax), math.abs(by - ay))
+  local samples = math.max(4, math.ceil(chord * SUBPIXELS * 3))
+  for sample = 0, samples do
+    local t = sample / samples
+    local inverse = 1 - t
+    local x = inverse * inverse * ax + 2 * inverse * t * control_x + t * t * bx
+    local y = inverse * inverse * ay + 2 * inverse * t * control_y + t * t * by
+    stamp(cells, size, origin_x, origin_y, x, y, index)
+  end
+end
+
 
 local function render_chunk(surface, chunk_x, chunk_y)
   local origin_x, origin_y = chunk_x * CHUNK_SIZE, chunk_y * CHUNK_SIZE

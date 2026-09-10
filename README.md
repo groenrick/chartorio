@@ -19,8 +19,9 @@ the ragged edge where the charted area stops.*
 
 - **Terrain and factory** — tiles and entities in their real `map_color`, the
   same palette the in-game map uses, so it reads exactly like the map view.
-  Rails are drawn along their own direction rather than as filled bounding
-  boxes, so diagonals stay diagonal instead of turning into staircases
+  Rails are drawn between their real endpoints, curving through the point where
+  their end tangents meet, rather than as filled bounding boxes, so track reads
+  as track at any angle
 - **Ore patches** — hover one and the tooltip gives the whole patch's total,
   like the game does; oil reports a yield percentage instead of a count
 - **Nests and worms** in enemy red, and **live biters** that appear only where
