@@ -1,0 +1,56 @@
+name: Feature request
+description: Something the map should be able to do.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things shape what can be built here, and it saves a round trip to
+        know them up front:
+
+        - **There is no mod, and there will not be one.** The game code is a
+          scenario script inside the save, because a mod changes the checksum
+          and forces every client to install it.
+        - **The page has no libraries and the bridge is standard library only.**
+          Both are features: this installs on a bare server with nothing but
+          Python 3.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What should it do
+      description: Describe it from the map's side, as something you would see or use.
+      placeholder: |
+        A search box that jumps the view to a train station by name.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What you are doing when you want it, and what you do today instead.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: part
+    attributes:
+      label: Where it would live
+      description: A guess is fine.
+      options:
+        - Not sure
+        - The map in the browser
+        - The bridge
+        - The game side
+        - Install or tooling
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Anything in the way
+      description: "Optional, and only if you already know: something that makes this harder than it looks. In this project the usual one is cost on the game thread, because an entity search costs time proportional to the area searched, not to what it finds."
+    validations:
+      required: false

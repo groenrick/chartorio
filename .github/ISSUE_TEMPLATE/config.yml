@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: How Chartorio is put together
+    url: https://github.com/groenrick/chartorio/blob/main/AGENTS.md
+    about: The three parts, the rules that come from real failures, and why there is no mod. Read this before proposing a change.
+  - name: Question about running it
+    url: https://github.com/groenrick/chartorio/discussions
+    about: Setup and usage questions, rather than a defect.
