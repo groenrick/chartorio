@@ -160,6 +160,7 @@
   <header>
     <h1>Chartorio</h1>
     <div class="status"><span id="status-dot" class="dot down"></span><span id="status-text">connecting…</span></div>
+    <div class="status"><span id="viewer-count">0</span> watching</div>
   </header>
   <div class="scroll">
     <section>
@@ -1618,6 +1619,11 @@ const CHANNELS = {
     rebuildZoomIndex();
     document.getElementById("chunk-count").textContent = charted.size;
     requestDraw();
+  },
+  // Browsers with the page open, which the server pushes whenever one joins or
+  // leaves. Not the players the map draws: a viewer may well be neither.
+  viewers: (payload) => {
+    document.getElementById("viewer-count").textContent = payload.viewers || 0;
   },
 };
 
