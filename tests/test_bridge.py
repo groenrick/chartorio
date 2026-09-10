@@ -8,6 +8,7 @@ pure ones, and the two that are not are stubbed.
 import os
 import struct
 import sys
+import threading
 import unittest
 import zlib
 
@@ -151,9 +152,12 @@ class HubBehaviour(unittest.TestCase):
         self.hub.add(live)
         self.hub.add(dead)
         dead.open = False
+        # Joining is itself a broadcast now, so count what this one delivered
+        # rather than what each client has ever been sent.
+        before = len(live.sent)
         self.hub.broadcast("state", {"players": []})
-        self.assertEqual(len(live.sent), 1)
-        self.assertEqual(dead.sent, [])
+        self.assertEqual(len(live.sent), before + 1)
+        self.assertNotIn(("state", {"players": []}), dead.sent)
 
     def test_any_layer_is_true_when_one_client_wants_it(self):
         self.hub.add(FakeClient(layers={"signals": False}))
@@ -173,6 +177,62 @@ class HubBehaviour(unittest.TestCase):
         self.hub.add(wanted)
         self.assertIs(self.hub.by_identifier("abc"), wanted)
         self.assertIsNone(self.hub.by_identifier("nobody"))
+
+
+class ViewerCount(unittest.TestCase):
+    """How many browsers have the map open. The hub knows the moment that
+    changes, so the number is pushed on join and on leave and never polled."""
+
+    def setUp(self):
+        self.hub = bridge.Hub()
+
+    def counts(self, client):
+        return [payload["viewers"] for channel, payload in client.sent if channel == "viewers"]
+
+    def test_a_joining_client_is_told_the_count(self):
+        client = FakeClient()
+        self.hub.add(client)
+        self.assertEqual(self.counts(client), [1],
+                         "a browser must not wait for the next change to learn the count")
+
+    def test_everyone_hears_a_client_join(self):
+        first, second = FakeClient(), FakeClient()
+        self.hub.add(first)
+        self.hub.add(second)
+        self.assertEqual(self.counts(first), [1, 2])
+        self.assertEqual(self.counts(second), [2])
+
+    def test_everyone_left_hears_a_client_leave(self):
+        first, second = FakeClient(), FakeClient()
+        self.hub.add(first)
+        self.hub.add(second)
+        self.hub.remove(second)
+        self.assertEqual(self.counts(first), [1, 2, 1])
+        self.assertEqual(self.counts(second), [2], "a client that left is not told anything")
+
+    def test_a_closed_client_stops_counting(self):
+        # A browser that went away without the socket closing cleanly is still
+        # in the list, so the count has to come from the open clients only.
+        stale, client = FakeClient(), FakeClient()
+        self.hub.add(stale)
+        stale.open = False
+        self.hub.add(client)
+        self.assertEqual(self.counts(client), [1])
+
+    def test_the_lock_is_free_while_the_count_goes_out(self):
+        # broadcast() takes the hub lock again through snapshot(), and a plain
+        # Lock is not reentrant: announcing inside it would hang the connection
+        # thread, and with it every browser.
+        done = threading.Event()
+
+        def join_and_leave():
+            client = FakeClient()
+            self.hub.add(client)
+            self.hub.remove(client)
+            done.set()
+
+        threading.Thread(target=join_and_leave, daemon=True).start()
+        self.assertTrue(done.wait(5), "add() or remove() deadlocked announcing the count")
 
 
 class WorldCharting(unittest.TestCase):

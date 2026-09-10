@@ -366,12 +366,14 @@ class Hub:
     def add(self, client):
         with self.lock:
             self.clients.append(client)
+        self.announce_viewers()
 
     def remove(self, client):
         with self.lock:
             if client in self.clients:
                 self.clients.remove(client)
         client.close()
+        self.announce_viewers()
 
     def snapshot(self):
         with self.lock:
@@ -380,6 +382,15 @@ class Hub:
     def broadcast(self, channel, payload):
         for client in self.snapshot():
             client.send(channel, payload)
+
+    def announce_viewers(self):
+        """Push the count on the only two occasions it can change, so nothing
+        polls for it and a browser that just joined hears it straight away.
+
+        Called outside `self.lock`: broadcasting takes that same lock again
+        through `snapshot`, and a plain Lock is not reentrant.
+        """
+        self.broadcast("viewers", {"viewers": self.viewers()})
 
     def any_layer(self, name):
         return any(client.layers.get(name) for client in self.snapshot())
