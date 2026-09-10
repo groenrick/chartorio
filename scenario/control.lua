@@ -236,19 +236,22 @@ local function paint_rail(cells, size, origin_x, origin_y, entity, index)
   if length <= 0 then length = 2 end
 
   local position = entity.position
+  -- Step in half cells and stamp a two by two block. A single cell per step
+  -- leaves diagonal runs touching only at their corners, which reads as a
+  -- dotted line; overlapping blocks keep the track solid at any angle.
   local samples = math.ceil(length * SUBPIXELS * 2)
-  local across_x = math.floor(-step_y + 0.5)
-  local across_y = math.floor(step_x + 0.5)
 
   for sample = 0, samples do
     local along = -length / 2 + length * sample / samples
     local cell_x = math.floor((position.x + step_x * along - origin_x) * SUBPIXELS)
     local cell_y = math.floor((position.y + step_y * along - origin_y) * SUBPIXELS)
-    for width = 0, 1 do
-      local x = cell_x + across_x * width
-      local y = cell_y + across_y * width
-      if x >= 0 and y >= 0 and x < size and y < size then
-        cells[y * size + x + 1] = index
+    for offset_y = 0, 1 do
+      for offset_x = 0, 1 do
+        local x = cell_x + offset_x
+        local y = cell_y + offset_y
+        if x >= 0 and y >= 0 and x < size and y < size then
+          cells[y * size + x + 1] = index
+        end
       end
     end
   end
