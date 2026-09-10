@@ -73,6 +73,14 @@ chunks, and a world-wide scan does not fit inside an RCON round trip. The chunk
 index, pollution and biters are all asked for per viewport, bounded server side,
 and the browser re-asks as you pan.
 
+### Rails
+
+![Curves and junctions as Chartorio draws them](docs/rail-rendering.png)
+
+*A turnout and a junction. Rails ask the game where they actually begin and
+end, so curves bend through the point where their end tangents meet and joins
+land exactly on the neighbouring track.*
+
 ### Zoom levels
 
 ![Native tiles next to one zoomed out tile](docs/zoom-levels.png)
