@@ -1111,31 +1111,84 @@ function beltRow(entity) {
   return (BELT_STRAIGHT[entity.d] || 3) - 1;     // indices are 1 based
 }
 
-function spriteLayers(meta, entity) {
-  if (meta.kind === "variations") {
-    // graphics_variation is 1 based and only sent when it is not the first.
-    const index = ((entity.v || 1) - 1) % meta.variations.length;
-    return meta.variations[index];
+// Every family is the same idea: a sprite chosen by a key derived from the
+// entity's own state. These turn an entity into that key; a key that is not in
+// the sheet falls back to any entry rather than drawing nothing, so a family
+// the game adds later degrades instead of leaving holes.
+const DIRECTION_ORDER = [0, 4, 8, 12];        // north, east, south, west
+
+function spriteKey(meta, entity) {
+  switch (meta.kind) {
+    case "variations":
+      // graphics_variation is 1 based and only sent when it is not the first.
+      return String(entity.v || 1);
+    case "directional":
+      return String(entity.d || 0);
+    case "underground":
+      // An entrance and an exit are drawn differently and nothing else tells
+      // the two ends of the same belt apart.
+      return entity.g === "output" ? "output" : "input";
+    case "pipe":
+      // Which sides are connected, not which way it faces.
+      return String(entity.c || 0);
+    default:
+      return null;
   }
-  return meta.layers || [];
 }
 
-function drawOneLayer(layer, entity, meta, now) {
-  const image = spriteImage(layer.file);
-  if (!image.complete || image.failed || !image.naturalWidth) return;
+function spriteLayers(meta, entity) {
+  if (!meta.by) return meta.layers || [];
+  const key = spriteKey(meta, entity);
+  const found = key !== null && meta.by[key];
+  if (found) return found;
+  // A direction we have no sheet for is better drawn facing north than not
+  // drawn at all.
+  const fallback = meta.by["0"] || meta.by["1"] || meta.by["input"];
+  return fallback || Object.values(meta.by)[0] || [];
+}
 
-  let sourceX = layer.x || 0;
-  let sourceY = layer.y || 0;
+// Which cell of a grid sheet to draw. Separate-file families sit at the
+// layer's own offset; the grids are addressed off it.
+function spriteCell(meta, layer, entity, now) {
+  const baseX = layer.x || 0;
+  const baseY = layer.y || 0;
   if (meta.kind === "belt") {
     const frames = layer.frames || 1;
     // Frames advance with the belt's own speed, so a fast belt visibly runs
     // faster than a yellow one. Factorio moves a belt `speed` tiles a tick at
     // 60 ticks a second, and the sheet is one full cycle.
     const rate = (meta.speed || 0.03125) * 60 * (meta.speed_coefficient || 1);
-    const frame = Math.floor(now * rate) % frames;
-    sourceX = frame * layer.width;
-    sourceY = beltRow(entity) * layer.height;
+    return { x: (Math.floor(now * rate) % frames) * layer.width,
+             y: beltRow(entity) * layer.height };
   }
+  if (meta.kind === "ore") {
+    // Richness across, random variation down. stage_counts runs from richest
+    // to poorest, so the first threshold the amount clears is the stage.
+    const counts = meta.stage_counts || [0];
+    let stage = counts.length - 1;
+    for (let index = 0; index < counts.length; index++) {
+      if ((entity.a || 0) >= counts[index]) { stage = index; break; }
+    }
+    const rows = layer.variation_count || 1;
+    const row = ((entity.v || 1) - 1) % rows;
+    return { x: baseX + stage * layer.width, y: baseY + row * layer.height };
+  }
+  if (meta.kind === "underground") {
+    // The four directions sit side by side on one sheet; the row already came
+    // from the entrance-or-exit key.
+    const column = Math.max(0, DIRECTION_ORDER.indexOf(entity.d || 0));
+    return { x: baseX + column * layer.width, y: baseY };
+  }
+  return { x: baseX, y: baseY };
+}
+
+function drawOneLayer(layer, entity, meta, now) {
+  const image = spriteImage(layer.file);
+  if (!image.complete || image.failed || !image.naturalWidth) return;
+
+  const cell = spriteCell(meta, layer, entity, now);
+  const sourceX = cell.x;
+  const sourceY = cell.y;
 
   const tilesWide = layer.width * layer.scale / SPRITE_PIXELS_PER_TILE;
   const tilesHigh = layer.height * layer.scale / SPRITE_PIXELS_PER_TILE;

@@ -114,7 +114,7 @@ function boot() {
   // the context the way `function` and `var` do, so the few the tests need are
   // handed out by an epilogue running in the same scope.
   const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES, layers,"
-              + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers,"
+              + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers, spriteCell, spriteKey,"
               + " __setSpritesAvailable(v) { spritesAvailable = v; },"
               + " get transport() { return transport; } };";
   vm.runInContext(extractScript(html) + probe, context, { filename: "index.html" });
@@ -277,23 +277,82 @@ test("an unknown belt direction still draws something", () => {
 
 test("a tree draws the variation the game gave it, trunk and leaves", () => {
   const page = boot();
-  const meta = { kind: "variations", variations: [["a-trunk", "a-leaves"], ["b-trunk", "b-leaves"], ["c-trunk", "c-leaves"]] };
+  const meta = { kind: "variations", by: { 1: ["a-trunk", "a-leaves"], 2: ["b-trunk", "b-leaves"] } };
   assert.deepEqual(page.spriteLayers(meta, { v: 2 }), ["b-trunk", "b-leaves"]);
-  assert.deepEqual(page.spriteLayers(meta, { v: 3 }), ["c-trunk", "c-leaves"]);
 });
 
 test("a tree with no variation reported falls back to the first", () => {
   // The scenario only sends `v` when it is not 1, to keep the payload small.
   const page = boot();
-  const meta = { kind: "variations", variations: [["a-trunk"], ["b-trunk"]] };
+  const meta = { kind: "variations", by: { 1: ["a-trunk"], 2: ["b-trunk"] } };
   assert.deepEqual(page.spriteLayers(meta, {}), ["a-trunk"]);
 });
 
-test("a variation beyond what was extracted wraps instead of vanishing", () => {
+test("a key with no sheet still draws something", () => {
+  // A family the game gains later must degrade, not leave holes in the map.
   const page = boot();
-  const meta = { kind: "variations", variations: [["a"], ["b"]] };
-  assert.deepEqual(page.spriteLayers(meta, { v: 5 }), ["a"],
-                   "a tree must still be drawn if fewer variations were extracted");
+  const meta = { kind: "variations", by: { 1: ["a"], 2: ["b"] } };
+  assert.deepEqual(page.spriteLayers(meta, { v: 9 }), ["a"]);
+});
+
+test("a directional entity picks the sheet for the way it was built", () => {
+  const page = boot();
+  const meta = { kind: "directional", by: { 0: ["n"], 4: ["e"], 8: ["s"], 12: ["w"] } };
+  assert.deepEqual(page.spriteLayers(meta, { d: 8 }), ["s"], "south");
+  assert.deepEqual(page.spriteLayers(meta, { d: 12 }), ["w"], "west");
+  assert.deepEqual(page.spriteLayers(meta, {}), ["n"], "no direction means north");
+});
+
+test("an underground belt tells its entrance from its exit", () => {
+  const page = boot();
+  const meta = { kind: "underground", by: { input: ["in"], output: ["out"] } };
+  assert.deepEqual(page.spriteLayers(meta, { g: "output" }), ["out"]);
+  assert.deepEqual(page.spriteLayers(meta, { g: "input" }), ["in"]);
+  assert.deepEqual(page.spriteLayers(meta, {}), ["in"], "an unreported end is an entrance");
+});
+
+test("an underground belt offsets across the sheet by direction", () => {
+  // The four directions sit side by side on one 768px sheet of 192px cells.
+  const page = boot();
+  const meta = { kind: "underground", by: { input: [{}] } };
+  const layer = { width: 192, height: 192, x: 0, y: 192 };
+  // Compared field by field: an object built inside the vm context has that
+  // context's prototype, which deepStrictEqual rejects.
+  for (const [direction, column] of [[0, 0], [4, 1], [8, 2], [12, 3]]) {
+    const cell = page.spriteCell(meta, layer, { d: direction }, 0);
+    assert.equal(cell.x, column * 192, `direction ${direction} column`);
+    assert.equal(cell.y, 192, `direction ${direction} stays on the entrance row`);
+  }
+});
+
+test("a pipe picks its shape from which sides are connected", () => {
+  const page = boot();
+  const meta = { kind: "pipe", by: { 0: ["single"], 5: ["vertical"], 10: ["horizontal"], 15: ["cross"] } };
+  assert.deepEqual(page.spriteLayers(meta, { c: 5 }), ["vertical"], "north and south");
+  assert.deepEqual(page.spriteLayers(meta, { c: 10 }), ["horizontal"], "east and west");
+  assert.deepEqual(page.spriteLayers(meta, { c: 15 }), ["cross"]);
+  assert.deepEqual(page.spriteLayers(meta, { c: 0 }), ["single"], "connected to nothing");
+});
+
+test("ore draws the richness stage its amount has left", () => {
+  // stage_counts runs richest to poorest; the first threshold the amount
+  // clears is the stage, so a spent patch looks thin.
+  const page = boot();
+  const meta = { kind: "ore", stage_counts: [15000, 9500, 5500, 2900, 1300, 400, 150, 80] };
+  const layer = { width: 128, height: 128, x: 0, y: 0, variation_count: 8 };
+  assert.equal(page.spriteCell(meta, layer, { a: 20000 }, 0).x, 0, "richer than the top stage");
+  assert.equal(page.spriteCell(meta, layer, { a: 9500 }, 0).x, 128, "second stage");
+  assert.equal(page.spriteCell(meta, layer, { a: 100 }, 0).x, 7 * 128, "nearly spent");
+  assert.equal(page.spriteCell(meta, layer, { a: 0 }, 0).x, 7 * 128, "empty stays on the last stage");
+});
+
+test("ore variation picks a row and stays on the sheet", () => {
+  const page = boot();
+  const meta = { kind: "ore", stage_counts: [100] };
+  const layer = { width: 128, height: 128, x: 0, y: 0, variation_count: 8 };
+  assert.equal(page.spriteCell(meta, layer, { a: 100, v: 3 }, 0).y, 2 * 128);
+  assert.equal(page.spriteCell(meta, layer, { a: 100, v: 9 }, 0).y, 0,
+               "a variation past the sheet must wrap, not crop off it");
 });
 
 test("ore totals read the way the game writes them", () => {

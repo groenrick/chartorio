@@ -1013,6 +1013,47 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
             if ok and variation and variation > 1 then record.v = variation end
             local shaped, shape = pcall(function() return entity.belt_shape end)
             if shaped and shape and shape ~= "straight" then record.s = shape end
+
+            -- An underground belt is an entrance or an exit and they are drawn
+            -- differently; nothing else distinguishes the two ends.
+            if kind == "underground-belt" then
+              local typed, ground = pcall(function() return entity.belt_to_ground_type end)
+              if typed and ground then record.g = ground end
+            end
+
+            -- Ore draws from a richness stage, so a nearly spent patch looks
+            -- thinner than a fresh one, which the flat colour never showed.
+            if kind == "resource" then
+              local amounted, amount = pcall(function() return entity.amount end)
+              if amounted and amount then record.a = amount end
+            end
+
+            -- A pipe's shape comes from which sides are connected, not from its
+            -- direction. The fluidbox already knows its neighbours, so this
+            -- costs no search: bits are north 1, east 2, south 4, west 8.
+            if kind == "pipe" or kind == "pipe-to-ground" then
+              local linked, mask = pcall(function()
+                local bits = 0
+                for _, group in pairs(entity.neighbours or {}) do
+                  if type(group) == "table" then
+                    for _, other in pairs(group) do
+                      if other and other.valid then
+                        local dx = other.position.x - position.x
+                        local dy = other.position.y - position.y
+                        if math.abs(dx) > math.abs(dy) then
+                          bits = bits + (dx > 0 and 2 or 8)
+                        elseif math.abs(dy) > 0 then
+                          bits = bits + (dy > 0 and 4 or 1)
+                        end
+                      end
+                    end
+                  end
+                end
+                return bits
+              end)
+              if linked and mask then record.c = mask end
+            end
+
             entities[#entities + 1] = record
           end
         end
