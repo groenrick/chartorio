@@ -273,12 +273,45 @@ def dump_data(binary, config, mods, data_dir):
 
 
 def wanted_from_map(url):
-    """Only the prototypes this world actually contains. The scenario's palette
+    """Which entity prototypes and which tiles this world actually contains. The scenario's palette
     already tracks every entity the map has seen, so the extract stays small."""
     with urllib.request.urlopen(url.rstrip("/") + "/palette", timeout=15) as handle:
         palette = json.load(handle)
-    return sorted({key[2:] for key in palette.get("keys", {})
-                   if key.startswith("e:") or key.startswith("x:")})
+    keys = palette.get("keys", {})
+    return (sorted({key[2:] for key in keys if key[:2] in ("e:", "x:")}),
+            sorted({key[2:] for key in keys if key.startswith("t:")}))
+
+
+def tile_sprite(prototype):
+    """A tile's base texture. `variants.main` holds one entry per patch size —
+    the game covers open ground with the size 2, 4 and 8 sheets in fewer draws
+    — and the size 1 entry is the one that can be drawn per tile.
+
+    A cell is 32 / scale source pixels, because a tile is 32 world pixels and
+    the art is supersampled. `count` variants run along x, wrapping every
+    `line_length`.
+    """
+    variants = prototype.get("variants")
+    if not isinstance(variants, dict):
+        return None
+    main = variants.get("main")
+    if not isinstance(main, list):
+        return None
+    for entry in main:
+        if entry.get("size") != 1 or not entry.get("picture"):
+            continue
+        scale = entry.get("scale", 1) or 1
+        count = entry.get("count", 1) or 1
+        return {
+            "filename": entry["picture"],
+            "cell": int(round(32 / scale)),
+            "count": count,
+            "line_length": entry.get("line_length") or count,
+            "x": entry.get("x") or 0,
+            "y": entry.get("y") or 0,
+            "scale": scale,
+        }
+    return None
 
 
 def main():
@@ -297,7 +330,10 @@ def main():
         os.path.join(os.path.dirname(args.binary), "..", "data"))
 
     raw = dump_data(args.binary, args.config, args.mods, data_dir)
-    wanted = set(wanted_from_map(args.only_from_map)) if args.only_from_map else None
+    wanted, wanted_tiles = (None, None)
+    if args.only_from_map:
+        entities, terrain = wanted_from_map(args.only_from_map)
+        wanted, wanted_tiles = set(entities), set(terrain)
 
     os.makedirs(args.out, exist_ok=True)
     index, copied, skipped = {}, {}, set()
@@ -397,11 +433,37 @@ def main():
             entry["category"] = category
             index[name] = entry
 
+    # Terrain. Only the tiles this world has, which the palette also lists.
+    tiles = {}
+    for name, prototype in (raw.get("tile") or {}).items():
+        if not isinstance(prototype, dict):
+            continue
+        if wanted_tiles is not None and name not in wanted_tiles:
+            continue
+        info = tile_sprite(prototype)
+        if not info:
+            continue
+        source = resolve(info["filename"], data_dir)
+        if not source or not os.path.isfile(source):
+            continue
+        if source not in copied:
+            target = os.path.basename(source)
+            while target in copied.values():
+                target = "_" + target
+            shutil.copy2(source, os.path.join(args.out, target))
+            copied[source] = target
+        info = dict(info)
+        info.pop("filename")
+        info["file"] = copied[source]
+        tiles[name] = info
+
     with open(os.path.join(args.out, "index.json"), "w") as handle:
-        json.dump({"version": 1, "pixels_per_tile": 32, "sprites": index}, handle, indent=1)
+        json.dump({"version": 1, "pixels_per_tile": 32,
+                   "sprites": index, "tiles": tiles}, handle, indent=1)
 
     size = sum(os.path.getsize(os.path.join(args.out, f)) for f in os.listdir(args.out))
-    print("%d sprites, %.1f MB in %s" % (len(index), size / 1e6, args.out))
+    print("%d sprites and %d tiles, %.1f MB in %s"
+          % (len(index), len(tiles), size / 1e6, args.out))
     missing = sorted(skipped - set(index))
     if missing:
         print("no sprite resolved for %d: %s" % (len(missing), ", ".join(missing[:14])))

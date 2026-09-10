@@ -1050,6 +1050,7 @@ async function loadSpriteIndex() {
     const payload = await (await fetch("/sprites/index.json")).json();
     spritesAvailable = Boolean(payload.available);
     spriteIndex = payload.sprites || {};
+    tileIndex = payload.tiles || {};
     if (payload.min_scale) spriteMinScale = payload.min_scale;
   } catch (error) {
     spritesAvailable = false;
@@ -1204,6 +1205,145 @@ function drawOneLayer(layer, entity, meta, now) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Terrain sprites
+//
+// The chunk raster the bridge already fetches carries the palette index of
+// every position, and the palette maps an index to `t:<name>`, so the tile
+// identity is there — `render_leaf` only throws it away on the way to a PNG.
+// This draws the real tile texture per world tile instead of a flat colour.
+//
+// Per chunk, into an offscreen canvas, because a screenful at eight pixels to
+// a world tile is around a hundred thousand tiles and a drawImage each would
+// not survive a frame. Terrain only changes when the chunk does, so the canvas
+// is kept until the chunk's revision moves.
+//
+// Cached at 16 pixels to a tile: a 512px canvas is 1 MB, so a screenful of
+// chunks stays in tens of megabytes. Zoomed past 16 the terrain softens
+// slightly while the entity sprites stay crisp. Transitions between tile types
+// are not drawn at all yet, so a shoreline has square corners.
+// ---------------------------------------------------------------------------
+const TERRAIN_CACHE_PX = 16;      // cached pixels per world tile
+const TERRAIN_CACHE_MAX = 64;     // chunks kept, oldest dropped first
+let tileIndex = null;             // tile name -> {file, cell, count, line_length, x, y}
+let terrainCache = new Map();     // "cx,cy" -> {revision, canvas}
+let terrainPending = new Set();
+
+// A deterministic scatter, so the same tile always picks the same variant and
+// the ground does not shimmer when a chunk is rebuilt. Factorio does not
+// publish how it chooses, so this will not match the game tile for tile.
+function tileVariant(worldX, worldY, count) {
+  let hash = (worldX * 73856093) ^ (worldY * 19349663);
+  hash = (hash ^ (hash >>> 13)) * 1274126177;
+  return Math.abs(hash ^ (hash >>> 16)) % count;
+}
+
+// The game sends the raster run length coded, as count/index pairs. A short
+// run list means the tail is whatever index 0 is, which is how an unrastered
+// edge comes back.
+function expandRuns(runs, length) {
+  const indices = new Uint16Array(length);
+  let at = 0;
+  for (let position = 0; position + 1 < runs.length && at < length; position += 2) {
+    const count = runs[position];
+    const value = runs[position + 1];
+    for (let n = 0; n < count && at < length; n++) indices[at++] = value;
+  }
+  return indices;
+}
+
+function terrainKey(chunkX, chunkY) {
+  return chunkX + "," + chunkY;
+}
+
+function buildTerrainChunk(chunkX, chunkY, payload) {
+  const size = payload.size;                  // raster cells per chunk edge
+  const step = size / CHUNK_TILES;            // cells per world tile
+  const indices = expandRuns(payload.runs || [], size * size);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = CHUNK_TILES * TERRAIN_CACHE_PX;
+  canvas.height = CHUNK_TILES * TERRAIN_CACHE_PX;
+  const target = canvas.getContext("2d");
+  let drew = false;
+  for (let ty = 0; ty < CHUNK_TILES; ty++) {
+    for (let tx = 0; tx < CHUNK_TILES; tx++) {
+      // Sample the middle of the tile: the raster is finer than one cell a tile.
+      const cell = Math.floor(ty * step) * size + Math.floor(tx * step);
+      const name = payload.names[indices[cell]];
+      if (!name) continue;
+      const meta = tileIndex[name.slice(2)];   // drop the "t:" prefix
+      if (!meta) continue;
+      const image = spriteImage(meta.file);
+      if (!image.complete || image.failed || !image.naturalWidth) continue;
+      const variant = tileVariant(chunkX * CHUNK_TILES + tx, chunkY * CHUNK_TILES + ty,
+                                  meta.count || 1);
+      const line = meta.line_length || meta.count || 1;
+      try {
+        target.drawImage(image,
+          (meta.x || 0) + (variant % line) * meta.cell,
+          (meta.y || 0) + Math.floor(variant / line) * meta.cell,
+          meta.cell, meta.cell,
+          tx * TERRAIN_CACHE_PX, ty * TERRAIN_CACHE_PX,
+          TERRAIN_CACHE_PX, TERRAIN_CACHE_PX);
+        drew = true;
+      } catch (error) {
+        image.failed = true;
+      }
+    }
+  }
+  return drew ? canvas : null;
+}
+
+function requestTerrain(chunkX, chunkY) {
+  const key = terrainKey(chunkX, chunkY);
+  if (terrainPending.has(key)) return;
+  terrainPending.add(key);
+  const query = new URLSearchParams({ surface: SURFACE, x: chunkX, y: chunkY });
+  fetch("/raster?" + query)
+    .then((response) => (response.ok ? response.json() : null))
+    .then((payload) => {
+      terrainPending.delete(key);
+      if (!payload || !payload.size) return;
+      const canvas = buildTerrainChunk(chunkX, chunkY, payload);
+      if (!canvas) return;
+      terrainCache.set(key, { revision: chartedRevision(chunkX, chunkY), canvas });
+      while (terrainCache.size > TERRAIN_CACHE_MAX) {
+        terrainCache.delete(terrainCache.keys().next().value);
+      }
+      requestDraw();
+    })
+    .catch(() => { terrainPending.delete(key); });
+}
+
+function chartedRevision(chunkX, chunkY) {
+  const entry = charted.get(key(chunkX, chunkY));
+  return entry === undefined ? -1 : entry;
+}
+
+function drawTerrainSprites() {
+  if (!spritesWanted() || !tileIndex) return;
+  const box = viewportBox();
+  const first = { x: Math.floor(box.x1 / CHUNK_TILES), y: Math.floor(box.y1 / CHUNK_TILES) };
+  const last = { x: Math.floor(box.x2 / CHUNK_TILES), y: Math.floor(box.y2 / CHUNK_TILES) };
+  for (let chunkY = first.y; chunkY <= last.y; chunkY++) {
+    for (let chunkX = first.x; chunkX <= last.x; chunkX++) {
+      const cacheKey = terrainKey(chunkX, chunkY);
+      const entry = terrainCache.get(cacheKey);
+      if (!entry || entry.revision !== chartedRevision(chunkX, chunkY)) {
+        if (charted.has(key(chunkX, chunkY))) requestTerrain(chunkX, chunkY);
+        continue;                              // the colour tile stands meanwhile
+      }
+      const topLeft = worldToScreen(chunkX * CHUNK_TILES, chunkY * CHUNK_TILES);
+      const span = CHUNK_TILES * view.scale;
+      // Rounded out by a pixel so neighbouring chunks do not show a seam.
+      context.drawImage(entry.canvas, Math.floor(topLeft.x), Math.floor(topLeft.y),
+                        Math.ceil(span) + 1, Math.ceil(span) + 1);
+    }
+  }
+}
+
 function drawSprites() {
   if (!spritesWanted() || !spriteIndex) return;
   const now = performance.now() / 1000;
@@ -1233,6 +1373,7 @@ function draw() {
     dimMap();
   }
 
+  drawTerrainSprites();
   drawSprites();
   if (layers.pollution) drawPollution();
   drawGrid();

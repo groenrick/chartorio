@@ -115,6 +115,7 @@ function boot() {
   // handed out by an epilogue running in the same scope.
   const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES, layers,"
               + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers, spriteCell, spriteKey,"
+              + " expandRuns, tileVariant, terrainKey,"
               + " __setSpritesAvailable(v) { spritesAvailable = v; },"
               + " get transport() { return transport; } };";
   vm.runInContext(extractScript(html) + probe, context, { filename: "index.html" });
@@ -353,6 +354,59 @@ test("ore variation picks a row and stays on the sheet", () => {
   assert.equal(page.spriteCell(meta, layer, { a: 100, v: 3 }, 0).y, 2 * 128);
   assert.equal(page.spriteCell(meta, layer, { a: 100, v: 9 }, 0).y, 0,
                "a variation past the sheet must wrap, not crop off it");
+});
+
+test("the chunk raster expands from its run length coding", () => {
+  const page = boot();
+  const indices = page.expandRuns([3, 7, 2, 9], 5);
+  assert.deepEqual(Array.from(indices), [7, 7, 7, 9, 9]);
+});
+
+test("a short run list leaves the tail as index zero", () => {
+  // An edge the game has not rastered comes back short, and must not be read
+  // off the end of the array.
+  const page = boot();
+  assert.deepEqual(Array.from(page.expandRuns([2, 4], 5)), [4, 4, 0, 0, 0]);
+});
+
+test("a run longer than the chunk is truncated, not overflowed", () => {
+  const page = boot();
+  assert.deepEqual(Array.from(page.expandRuns([99, 3], 4)), [3, 3, 3, 3]);
+});
+
+test("an odd run list is ignored rather than read past its end", () => {
+  const page = boot();
+  assert.deepEqual(Array.from(page.expandRuns([2, 5, 3], 4)), [5, 5, 0, 0]);
+});
+
+test("a tile always picks the same variant for the same position", () => {
+  // Terrain is rebuilt whenever a chunk changes, and the ground must not
+  // shimmer when it is.
+  const page = boot();
+  const first = page.tileVariant(120, -44, 16);
+  assert.equal(page.tileVariant(120, -44, 16), first, "not deterministic");
+  assert.ok(first >= 0 && first < 16, `variant ${first} is off the sheet`);
+});
+
+test("tile variants stay on the sheet for every count", () => {
+  const page = boot();
+  for (const count of [1, 4, 16]) {
+    for (let n = 0; n < 40; n++) {
+      const v = page.tileVariant(n * 7 - 100, n * -3 + 55, count);
+      assert.ok(v >= 0 && v < count, `count ${count} gave ${v}`);
+    }
+  }
+});
+
+test("neighbouring tiles do not all land on the same variant", () => {
+  // A hash that collapses would tile the ground with one texture and look
+  // worse than the flat colour it replaced.
+  const page = boot();
+  const seen = new Set();
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) seen.add(page.tileVariant(x, y, 16));
+  }
+  assert.ok(seen.size >= 6, `only ${seen.size} variants across 64 tiles`);
 });
 
 test("ore totals read the way the game writes them", () => {

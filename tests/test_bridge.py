@@ -282,6 +282,62 @@ class SpritePaths(unittest.TestCase):
         self.assertIsNone(bridge.sprite_path("a" * 300 + ".png"))
 
 
+class RasterCaching(unittest.TestCase):
+    """The terrain sprite layer and the colour tiles read the same raster, so
+    the game must only be asked for a chunk once per change."""
+
+    def setUp(self):
+        self.world = bridge.World()
+
+    def test_a_raster_is_returned_for_the_revision_it_was_stored_at(self):
+        self.world.put_raster(("nauvis", 1, 2), 7, {"runs": [4, 1]})
+        self.assertEqual(self.world.get_raster(("nauvis", 1, 2), 7), {"runs": [4, 1]})
+
+    def test_a_changed_chunk_misses_rather_than_serving_stale_ground(self):
+        self.world.put_raster(("nauvis", 1, 2), 7, {"runs": [4, 1]})
+        self.assertIsNone(self.world.get_raster(("nauvis", 1, 2), 8),
+                          "a new revision must re-ask the game")
+
+    def test_an_unknown_chunk_misses(self):
+        self.assertIsNone(self.world.get_raster(("nauvis", 9, 9), 1))
+
+    def test_the_raster_cache_evicts_the_least_recently_used(self):
+        original = bridge.TILE_CACHE_SIZE
+        bridge.TILE_CACHE_SIZE = 2
+        try:
+            self.world.put_raster(("nauvis", 1, 1), 1, {"a": 1})
+            self.world.put_raster(("nauvis", 2, 2), 1, {"b": 1})
+            self.world.get_raster(("nauvis", 1, 1), 1)      # touch
+            self.world.put_raster(("nauvis", 3, 3), 1, {"c": 1})
+            self.assertEqual(sorted(self.world.rasters),
+                             [("nauvis", 1, 1), ("nauvis", 3, 3)])
+        finally:
+            bridge.TILE_CACHE_SIZE = original
+
+
+class PaletteNames(unittest.TestCase):
+    """The terrain layer needs to know which tile an index is, which is the
+    opposite direction from the colour the map draws."""
+
+    def test_indices_map_back_to_their_keys(self):
+        saved = dict(bridge.PALETTE)
+        saved_call = bridge.call
+        try:
+            bridge.PALETTE["size"] = 0
+            payload = {"colors": [
+                {"index": 1, "key": "t:grass-1", "color": [50, 90, 40]},
+                {"index": 2, "key": "e:stone-furnace", "color": [0, 96, 145]},
+            ]}
+            bridge.call = lambda command: payload
+            bridge.refresh_palette(2)
+            self.assertEqual(bridge.PALETTE["names"]["1"], "t:grass-1")
+            self.assertEqual(bridge.PALETTE["names"]["2"], "e:stone-furnace")
+        finally:
+            bridge.call = saved_call        # never leave a stub behind
+            bridge.PALETTE.clear()
+            bridge.PALETTE.update(saved)
+
+
 class WorldCharting(unittest.TestCase):
     def setUp(self):
         self.world = bridge.World()
