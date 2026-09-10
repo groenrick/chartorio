@@ -4,9 +4,8 @@ std = "lua54"
 globals = { "storage" }          -- the scenario writes its own state here
 read_globals = {
   "game", "script", "defines", "helpers", "commands", "settings", "rcon",
+  "prototypes",
 }
-files["scenario/control.lua"] = {
-  -- Factorio's API is wide and a handler often takes an event it ignores.
-  ignore = { "212" },            -- unused argument
-}
-max_line_length = 100
+-- Line length is left alone on purpose: the scenario builds long API calls and
+-- wrapping them reads worse than the long line does.
+max_line_length = false
