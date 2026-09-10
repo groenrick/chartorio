@@ -1097,11 +1097,18 @@ class Handler(BaseHTTPRequestHandler):
         client.due = {}
 
 
+class Server(ThreadingHTTPServer):
+    # One browser opens a websocket plus a handful of parallel tile requests,
+    # and Python's default backlog of five drops whatever does not fit, which
+    # shows up in the browser as a websocket that cannot connect.
+    request_queue_size = 128
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def main():
     threading.Thread(target=scheduler, daemon=True).start()
-    server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    server.daemon_threads = True
-    server.serve_forever()
+    Server((LISTEN_HOST, LISTEN_PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":
