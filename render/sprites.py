@@ -148,6 +148,88 @@ def layer_info(node):
     }
 
 
+# Every family below is the same idea: a sprite chosen by a key derived from
+# the entity's own state. Only the derivation differs, so the index always
+# carries either one `layers` list or a `by` map from key to layers, and the
+# page has one selector per kind.
+DIRECTION_KEYS = {"north": 0, "east": 4, "south": 8, "west": 12}
+
+# A pipe's shape comes from which sides are connected, not from its direction.
+# Factorio works this out in C++ and ships no table, so this mapping is a
+# reading of the sprite names: bits are north 1, east 2, south 4, west 8.
+PIPE_BY_MASK = {
+    0: "straight_vertical_single",
+    1: "ending_up", 2: "ending_right", 4: "ending_down", 8: "ending_left",
+    5: "straight_vertical", 10: "straight_horizontal",
+    3: "corner_up_right", 9: "corner_up_left",
+    6: "corner_down_right", 12: "corner_down_left",
+    11: "t_up", 14: "t_down", 13: "t_left", 7: "t_right",
+    15: "cross",
+}
+
+
+def directional_layers(prototype):
+    """A table keyed north/east/south/west, wherever it is buried. Descending
+    into `north` and stopping — which is what happened at first — draws every
+    splitter, drill, boiler and pump facing north."""
+    def walk(node, depth=0):
+        if depth > 5 or not isinstance(node, dict):
+            return None
+        if set(DIRECTION_KEYS) <= set(node):
+            found = {}
+            for key, direction in DIRECTION_KEYS.items():
+                layer = layer_info(first_layer(node[key]))
+                if layer:
+                    found[direction] = [layer]
+            return found or None
+        for value in node.values():
+            deeper = walk(value, depth + 1)
+            if deeper:
+                return deeper
+        return None
+    return walk(prototype)
+
+
+def pipe_layers(prototype):
+    pictures = prototype.get("pictures")
+    if not isinstance(pictures, dict) or "straight_vertical" not in pictures:
+        return None
+    found = {}
+    for mask, key in PIPE_BY_MASK.items():
+        layer = layer_info(first_layer(pictures.get(key)))
+        if layer:
+            found[mask] = [layer]
+    return found or None
+
+
+def underground_layers(prototype):
+    """An underground belt is an input or an output end, and each end has four
+    directions. The variant comes from belt_to_ground_type on the entity."""
+    structure = prototype.get("structure")
+    if not isinstance(structure, dict) or "direction_in" not in structure:
+        return None
+    found = {}
+    for variant, field in (("input", "direction_in"), ("output", "direction_out")):
+        node = structure.get(field)
+        layer = layer_info(first_layer(node))
+        if layer:
+            # The sheet holds the four directions side by side, so the page
+            # offsets into it rather than needing four files.
+            found[variant] = [layer]
+    return found or None
+
+
+def ore_layers(prototype):
+    """Ore is a grid: richness across, random variation down. Which column to
+    draw comes from the entity's amount against stage_counts, so a nearly spent
+    patch looks sparse the way it does in game."""
+    stages = prototype.get("stages")
+    layer = layer_info(first_layer(stages)) if stages else None
+    if not layer:
+        return None
+    return layer
+
+
 def tree_variations(prototype):
     """Trees carry a dozen variations, each its own trunk and leaves files, and
     an entity picks one with `graphics_variation`. Taking the first variation's
@@ -247,17 +329,50 @@ def main():
                 served["file"] = copied[source]
                 return served
 
-            entry = None
-            variations = tree_variations(prototype) if category == "tree" else None
-            if variations:
-                taken = []
-                for layers in variations:
+            def take_group(groups):
+                out = {}
+                for key, layers in groups.items():
                     served = [take(layer) for layer in layers]
                     served = [layer for layer in served if layer]
                     if served:
-                        taken.append(served)
-                if taken:
-                    entry = {"kind": "variations", "variations": taken}
+                        out[str(key)] = served
+                return out or None
+
+            entry = None
+            variations = tree_variations(prototype) if category == "tree" else None
+            pipe = pipe_layers(prototype)
+            underground = underground_layers(prototype)
+            ore = ore_layers(prototype) if category == "resource" else None
+            directional = None
+            if not (variations or pipe or underground or ore):
+                directional = directional_layers(prototype)
+
+            if variations:
+                by = {}
+                for number, layers in enumerate(variations, start=1):
+                    served = [take(layer) for layer in layers]
+                    served = [layer for layer in served if layer]
+                    if served:
+                        by[str(number)] = served
+                if by:
+                    entry = {"kind": "variations", "by": by}
+            elif ore:
+                served = take(ore)
+                if served:
+                    entry = {"kind": "ore", "layers": [served],
+                             "stage_counts": prototype.get("stage_counts") or [0]}
+            elif pipe:
+                by = take_group(pipe)
+                if by:
+                    entry = {"kind": "pipe", "by": by}
+            elif underground:
+                by = take_group(underground)
+                if by:
+                    entry = {"kind": "underground", "by": by}
+            elif directional:
+                by = take_group(directional)
+                if by:
+                    entry = {"kind": "directional", "by": by}
             else:
                 layer = sprite_for(prototype)
                 info = layer_info(layer) if layer else None
