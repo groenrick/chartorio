@@ -13,6 +13,7 @@ import os
 import socket
 import struct
 import threading
+import urllib.parse
 import time
 import base64
 import hashlib
@@ -307,6 +308,53 @@ class WebSocketConnection:
         return data
 
 
+class SseConnection:
+    """Same interface as a websocket client, over server-sent events.
+
+    Not every network lets a plain ws:// upgrade through, and a map that
+    cannot connect is worse than one that streams a little less efficiently.
+    """
+
+    def __init__(self, wfile, identifier):
+        self.wfile = wfile
+        self.identifier = identifier
+        self.lock = threading.Lock()
+        self.open = True
+        self.viewport = None
+        self.chunk_box = None
+        self.scale = 1.0
+        self.layers = {}
+        self.last = {}
+        self.due = {}
+
+    def send(self, channel, payload, force=False):
+        if not self.open:
+            return
+        if not force:
+            with self.lock:
+                if self.last.get(channel) == payload:
+                    return
+                self.last[channel] = payload
+        frame = "event: %s\ndata: %s\n\n" % (channel, json.dumps({"channel": channel, "payload": payload}))
+        try:
+            with self.lock:
+                self.wfile.write(frame.encode("utf-8"))
+                self.wfile.flush()
+        except OSError:
+            self.open = False
+
+    def keepalive(self):
+        try:
+            with self.lock:
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except OSError:
+            self.open = False
+
+    def close(self):
+        self.open = False
+
+
 class Hub:
     """Every connected browser, and what the game therefore has to be asked."""
 
@@ -337,6 +385,12 @@ class Hub:
 
     def viewers(self):
         return len(self.snapshot())
+
+    def by_identifier(self, identifier):
+        for client in self.snapshot():
+            if getattr(client, "identifier", None) == identifier:
+                return client
+        return None
 
 
 HUB = Hub()
@@ -916,16 +970,23 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_tile(path)
         elif path == "/ws":
             self._serve_websocket()
+        elif path == "/events":
+            self._serve_events()
+        elif path == "/viewport":
+            self._serve_viewport_update()
         else:
             self.send_error(404)
 
     def _query(self):
+        # Values must be percent decoded: a browser sends the comma in
+        # "chunks=-15,-9,15,9" as %2C, and reading it raw silently produced a
+        # viewport the server could not parse.
         _, _, raw = self.path.partition("?")
         query = {}
         for part in raw.split("&"):
             key, _, value = part.partition("=")
             if key:
-                query[key] = value
+                query[urllib.parse.unquote(key)] = urllib.parse.unquote_plus(value)
         return query
 
     def _serve_region(self, cache, remember):
@@ -1043,6 +1104,39 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_events(self):
+        query = self._query()
+        identifier = query.get("id") or str(time.time())
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        client = SseConnection(self.wfile, identifier)
+        self._apply_viewport(client, {key: value for key, value in query.items()})
+        HUB.add(client)
+        client.send("state", WORLD.get_state(), force=True)
+        client.send("alerts", {"alerts": WORLD.alerts}, force=True)
+        client.send("tags", {"surface": "nauvis", "tags": WORLD.tags.get("nauvis", [])}, force=True)
+        try:
+            while client.open:
+                time.sleep(15)
+                client.keepalive()
+        except (OSError, BrokenPipeError):
+            pass
+        finally:
+            HUB.remove(client)
+        self.close_connection = True
+
+    def _serve_viewport_update(self):
+        query = self._query()
+        client = HUB.by_identifier(query.get("id"))
+        if client is None:
+            return self._send_json({"ok": False, "reason": "unknown client"})
+        self._apply_viewport(client, query)
+        self._send_json({"ok": True})
+
     def _serve_websocket(self):
         key = self.headers.get("Sec-WebSocket-Key")
         if not key or "websocket" not in (self.headers.get("Upgrade") or "").lower():
@@ -1088,11 +1182,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         client.viewport = viewport
         client.scale = float(request.get("scale") or 1.0)
+
         layers = request.get("layers")
-        client.layers = layers if isinstance(layers, dict) else {}
+        if isinstance(layers, dict):
+            client.layers = layers
+        elif isinstance(layers, str):
+            # Over server-sent events the layers arrive as a comma separated list.
+            client.layers = {name: True for name in layers.split(",") if name}
+
         chunk_box = request.get("chunks")
         if isinstance(chunk_box, list) and len(chunk_box) == 4:
             client.chunk_box = tuple(int(value) for value in chunk_box)
+        elif isinstance(chunk_box, str) and chunk_box.count(",") == 3:
+            try:
+                client.chunk_box = tuple(int(value) for value in chunk_box.split(","))
+            except ValueError:
+                pass
         # A moved view should answer at once rather than on the next tick.
         client.due = {}
 

@@ -67,7 +67,10 @@ save/world/control.lua ──RCON──> bridge.py ──WebSocket──> browse
    to browsers over server-sent events.
 3. The **web page** is one HTML file with no build step and no libraries. It
    opens a single WebSocket, tells the bridge which rectangle it is looking at
-   and which layers are on, and receives only what changed.
+   and which layers are on, and receives only what changed. If the WebSocket
+   cannot be established — some networks pass ordinary HTTP but refuse a plain
+   `ws://` upgrade — it falls back to server-sent events on `/events`, which
+   carries the same channels and the same viewport model.
 
 ### Load
 
@@ -195,6 +198,7 @@ All settings are environment variables on the bridge service.
 | --- | --- |
 | `/` | the map page |
 | `/ws` | the WebSocket. The browser sends `{type: "viewport", ...}`; the server pushes `state`, `chunks`, `tiles`, `units`, `signals`, `tags`, `pollution` and `alerts` |
+| `/events` | the same channels as `/ws` over server-sent events, used when a WebSocket cannot be established. Viewport comes from the query string and is updated through `/viewport` |
 | `/status` | what the game is being asked to do: calls, rate, and game thread share |
 | `/state` | players, trains, tick |
 | `/chunks?surface=&x1=&y1=&x2=&y2=` | charted chunks in a rectangle of **chunk** coordinates, with revisions, tile size and map seed |

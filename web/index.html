@@ -1127,27 +1127,34 @@ function applyChunks(payload) {
 // Panning, zooming or toggling a layer changes what this browser needs, so it
 // tells the server once instead of polling for it.
 let viewportTimer = null;
+function viewportBox() {
+  const topLeft = screenToWorld(0, 0);
+  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
+  return {
+    x1: Math.floor(topLeft.x) - 16,
+    y1: Math.floor(topLeft.y) - 16,
+    x2: Math.ceil(bottomRight.x) + 16,
+    y2: Math.ceil(bottomRight.y) + 16,
+    chunks: [
+      Math.floor(topLeft.x / CHUNK_TILES) - 2,
+      Math.floor(topLeft.y / CHUNK_TILES) - 2,
+      Math.floor(bottomRight.x / CHUNK_TILES) + 2,
+      Math.floor(bottomRight.y / CHUNK_TILES) + 2,
+    ],
+    scale: view.scale,
+  };
+}
+
 function sendViewport(immediate = false) {
   if (viewportTimer) clearTimeout(viewportTimer);
   const send = () => {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    const topLeft = screenToWorld(0, 0);
-    const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
-    socket.send(JSON.stringify({
-      type: "viewport",
-      x1: Math.floor(topLeft.x) - 16,
-      y1: Math.floor(topLeft.y) - 16,
-      x2: Math.ceil(bottomRight.x) + 16,
-      y2: Math.ceil(bottomRight.y) + 16,
-      chunks: [
-        Math.floor(topLeft.x / CHUNK_TILES) - 2,
-        Math.floor(topLeft.y / CHUNK_TILES) - 2,
-        Math.floor(bottomRight.x / CHUNK_TILES) + 2,
-        Math.floor(bottomRight.y / CHUNK_TILES) + 2,
-      ],
-      scale: view.scale,
-      layers: layers,
-    }));
+    const box = viewportBox();
+    if (transport === "websocket") {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: "viewport", ...box, layers: layers }));
+      return;
+    }
+    fetch("/viewport?" + eventStreamQuery()).catch(() => {});
   };
   if (immediate) send(); else viewportTimer = setTimeout(send, 200);
 }
@@ -1458,6 +1465,10 @@ for (const name of Object.keys(layers)) {
 // server pushes only what changed, and asks the game for nothing at all when
 // no one is connected.
 let socket = null;
+let events = null;              // server-sent events, used when a socket cannot open
+let transport = "websocket";
+let socketEverOpened = false;
+let clientId = Math.random().toString(36).slice(2) + Date.now().toString(36);
 let reconnectDelay = 500;
 
 function setStatus(text, up) {
@@ -1509,29 +1520,67 @@ const CHANNELS = {
   },
 };
 
+function handleMessage(raw) {
+  let message;
+  try {
+    message = JSON.parse(raw);
+  } catch (error) {
+    return;
+  }
+  const handler = CHANNELS[message.channel];
+  if (handler) handler(message.payload || {});
+}
+
+function eventStreamQuery() {
+  const box = viewportBox();
+  return new URLSearchParams({
+    id: clientId,
+    x1: box.x1, y1: box.y1, x2: box.x2, y2: box.y2,
+    chunks: box.chunks.join(","),
+    scale: box.scale,
+    layers: Object.keys(layers).filter((name) => layers[name]).join(","),
+  });
+}
+
+// Some networks pass ordinary HTTP but refuse a plain ws:// upgrade. Rather
+// than leave the map dead, fall back to server-sent events: same channels,
+// same viewport model, just a normal HTTP response holding the stream open.
+function useEventStream() {
+  transport = "events";
+  if (events) events.close();
+  events = new EventSource("/events?" + eventStreamQuery());
+  events.onopen = () => {
+    setStatus("connected (event stream)", true);
+    loadPalette();
+  };
+  for (const channel of Object.keys(CHANNELS)) {
+    events.addEventListener(channel, (event) => handleMessage(event.data));
+  }
+  events.onerror = () => setStatus("reconnecting…", false);
+}
+
 function connect() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   socket = new WebSocket(`${protocol}//${location.host}/ws`);
 
   socket.onopen = () => {
+    socketEverOpened = true;
+    transport = "websocket";
     reconnectDelay = 500;
     setStatus("connected", true);
     sendViewport(true);
     loadPalette();
   };
 
-  socket.onmessage = (event) => {
-    let message;
-    try {
-      message = JSON.parse(event.data);
-    } catch (error) {
-      return;
-    }
-    const handler = CHANNELS[message.channel];
-    if (handler) handler(message.payload || {});
-  };
+  socket.onmessage = (event) => handleMessage(event.data);
 
   socket.onclose = () => {
+    if (transport === "events") return;
+    if (!socketEverOpened) {
+      socket = null;          // it never worked here, so stop trying
+      useEventStream();
+      return;
+    }
     setStatus("reconnecting…", false);
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(10000, reconnectDelay * 2);
