@@ -306,6 +306,7 @@ function resize() {
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
   context.imageSmoothingEnabled = false;
   updateCenterPoint();
+  scheduleIndexRefresh();
   requestDraw();
 }
 
@@ -914,25 +915,50 @@ function renderPanel() {
   renderAlerts();
 }
 
+// The index is per viewport: a played save holds far too many chunks to list
+// them all, so ask for the rectangle on screen and merge what comes back.
+function viewportChunkBox(margin = 2) {
+  const topLeft = screenToWorld(0, 0);
+  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
+  return {
+    x1: Math.floor(topLeft.x / CHUNK_TILES) - margin,
+    y1: Math.floor(topLeft.y / CHUNK_TILES) - margin,
+    x2: Math.floor(bottomRight.x / CHUNK_TILES) + margin,
+    y2: Math.floor(bottomRight.y / CHUNK_TILES) + margin,
+  };
+}
+
 async function loadIndex() {
   try {
-    const response = await fetch(`/chunks?surface=${SURFACE}`);
-    const payload = await response.json();
+    const box = viewportChunkBox();
+    const query = new URLSearchParams({ surface: SURFACE, ...box });
+    const payload = await (await fetch("/chunks?" + query)).json();
     if (payload.size) tilePixels = payload.size;
     if (payload.seed !== undefined && payload.seed !== worldSeed) {
-      worldSeed = payload.seed;      // a regenerated map reuses chunk coordinates
+      worldSeed = payload.seed;      // a different world reuses chunk coordinates
+      charted.clear();
       tiles.clear();
       tileQueue = [];
       spotlightCache = null;
       tileGeneration++;
     }
-    charted = new Map((payload.chunks || []).map(([x, y, revision]) => [key(x, y), revision]));
+    const flat = payload.chunks || [];
+    for (let index = 0; index + 2 < flat.length; index += 3) {
+      charted.set(key(flat[index], flat[index + 1]), flat[index + 2]);
+    }
     rebuildZoomIndex();
     document.getElementById("chunk-count").textContent = charted.size;
     requestDraw();
   } catch (error) {
-    /* the poller will try again */
+    /* the next pan or poll tries again */
   }
+}
+
+// Panning and zooming reveal chunks the index has never been asked about.
+let indexTimer = null;
+function scheduleIndexRefresh() {
+  if (indexTimer) clearTimeout(indexTimer);
+  indexTimer = setTimeout(() => { loadIndex(); loadPollution(); }, 250);
 }
 
 let dragging = false;
@@ -1058,6 +1084,7 @@ canvas.addEventListener("pointerleave", () => {
 
 function endDrag(event) {
   dragging = false;
+  scheduleIndexRefresh();
   canvas.classList.remove("dragging");
   if (event && event.pointerId !== undefined && canvas.hasPointerCapture(event.pointerId)) {
     canvas.releasePointerCapture(event.pointerId);
@@ -1075,6 +1102,7 @@ canvas.addEventListener("wheel", (event) => {
   const after = screenToWorld(event.clientX, event.clientY);
   view.x += before.x - after.x;
   view.y += before.y - after.y;
+  scheduleIndexRefresh();
   requestDraw();
 }, { passive: false });
 
@@ -1228,6 +1256,7 @@ for (const name of Object.keys(layers)) {
   input.addEventListener("change", () => {
     layers[name] = input.checked;
     if (name === "biters" && input.checked) pollUnits();
+    if (name === "pollution" && input.checked) loadPollution();
     if (highlight && !layers[{ color: "terrain", units: "biters", players: "players", trains: "trains",
                                tags: "tags", alerts: "alerts" }[highlight.highlight]]) {
       highlight = null;
@@ -1286,8 +1315,10 @@ async function loadTags() {
 }
 
 async function loadPollution() {
+  if (!layers.pollution) return;
   try {
-    const payload = await (await fetch(`/pollution?surface=${SURFACE}`)).json();
+    const query = new URLSearchParams({ surface: SURFACE, ...viewportChunkBox() });
+    const payload = await (await fetch("/pollution?" + query)).json();
     pollution = { peak: payload.peak || 0, chunks: payload.chunks || [] };
     document.getElementById("pollution-peak").textContent = pollution.peak;
     requestDraw();

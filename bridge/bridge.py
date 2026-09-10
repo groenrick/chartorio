@@ -48,6 +48,9 @@ def _static_dir():
 
 STATIC_DIR = _static_dir()
 
+SOCKET_TIMEOUT = 20.0
+FRAGMENT_TIMEOUT = 0.3   # how long to wait for a possible continuation packet
+
 AUTH = 3
 AUTH_RESPONSE = 2
 EXEC_COMMAND = 2
@@ -91,7 +94,7 @@ class RconClient:
                 self.socket = None
 
     def _connect(self):
-        self.socket = socket.create_connection((self.host, self.port), timeout=15)
+        self.socket = socket.create_connection((self.host, self.port), timeout=SOCKET_TIMEOUT)
         request_id = self._write(AUTH, self.password)
         while True:
             packet_id, packet_type, _ = self._read_packet()
@@ -104,16 +107,34 @@ class RconClient:
             return
 
     def _command(self, body):
+        """Read one response, which may or may not be split.
+
+        A short packet is the whole answer. A long one may be the first of
+        several fragments, or it may be a single large packet, and nothing in
+        the protocol says which. So after a long packet, wait briefly for a
+        follow-up and treat silence as the end. Waiting unconditionally would
+        add that delay to every poll.
+        """
         request_id = self._write(EXEC_COMMAND, body)
-        chunks = []
-        while True:
-            packet_id, packet_type, payload = self._read_packet()
-            if packet_type != RESPONSE_VALUE or packet_id != request_id:
-                continue
-            chunks.append(payload)
-            if len(payload) < 4000:
-                break
-        return "".join(chunks)
+        parts = []
+        try:
+            while True:
+                try:
+                    packet_id, packet_type, payload = self._read_packet()
+                except (socket.timeout, TimeoutError):
+                    if parts:
+                        break
+                    raise
+                if packet_type != RESPONSE_VALUE or packet_id != request_id:
+                    continue
+                parts.append(payload)
+                if len(payload) < 4000:
+                    break
+                self.socket.settimeout(FRAGMENT_TIMEOUT)
+        finally:
+            if self.socket is not None:
+                self.socket.settimeout(SOCKET_TIMEOUT)
+        return "".join(parts)
 
     def _write(self, packet_type, body):
         self.request_id += 1
@@ -295,6 +316,38 @@ class UnitCache:
 
 
 UNITS = UnitCache()
+
+
+class RegionCache:
+    """Viewport scoped lookups. A played save holds tens of thousands of
+    chunks, so nothing here may ever walk the whole map."""
+
+    def __init__(self, command, ttl):
+        self.command = command
+        self.ttl = ttl
+        self.lock = threading.Lock()
+        self.entries = {}
+
+    def get(self, surface, box):
+        now = time.time()
+        cache_key = (surface,) + box
+        with self.lock:
+            entry = self.entries.get(cache_key)
+            if entry and now - entry[0] < self.ttl:
+                return entry[1]
+        payload = call("%s %s %d %d %d %d" % ((self.command, surface) + box))
+        chunks = payload.get("chunks")
+        payload["chunks"] = chunks if isinstance(chunks, list) else []
+        with self.lock:
+            self.entries[cache_key] = (now, payload)
+            if len(self.entries) > 64:
+                for key in [k for k, v in self.entries.items() if now - v[0] > self.ttl * 4]:
+                    self.entries.pop(key, None)
+        return payload
+
+
+INDEX = RegionCache("/chartorio_chunks", 10.0)
+POLLUTION = RegionCache("/chartorio_pollution", 20.0)
 
 
 class ResourceCache:
@@ -509,19 +562,10 @@ def dirty_poller():
 
 
 def index_poller():
+    """Only map tags are cheap enough to poll globally; chunks and pollution
+    are fetched per viewport when a browser asks for them."""
     while True:
         surface = "nauvis"
-        try:
-            payload = call("/chartorio_chunks %s" % surface)
-            if "chunks" in payload:
-                if not isinstance(payload["chunks"], list):
-                    payload["chunks"] = []
-                WORLD.set_index(payload["surface"], payload)
-                EVENTS.publish("index", {"surface": payload["surface"],
-                                         "count": len(payload["chunks"])})
-        except (OSError, RconError, ValueError):
-            pass
-
         try:
             tags = call("/chartorio_tags %s" % surface)
             found = tags.get("tags")
@@ -531,18 +575,6 @@ def index_poller():
                 EVENTS.publish("tags", {"surface": surface, "tags": found})
         except (OSError, RconError, ValueError):
             pass
-
-        try:
-            pollution = call("/chartorio_pollution %s" % surface)
-            chunks = pollution.get("chunks")
-            pollution["chunks"] = chunks if isinstance(chunks, list) else []
-            WORLD.pollution[surface] = pollution
-            EVENTS.publish("pollution", {"surface": surface,
-                                         "peak": pollution.get("peak", 0),
-                                         "count": len(pollution["chunks"]) // 3})
-        except (OSError, RconError, ValueError):
-            pass
-
         time.sleep(INDEX_INTERVAL)
 
 
@@ -571,8 +603,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"surface": self._query().get("surface", "nauvis"),
                              "tags": WORLD.tags.get(self._query().get("surface", "nauvis"), [])})
         elif path == "/pollution":
-            surface = self._query().get("surface", "nauvis")
-            self._send_json(WORLD.pollution.get(surface) or {"peak": 0, "chunks": []})
+            self._serve_region(POLLUTION, remember=False)
         elif path == "/alerts":
             self._send_json({"alerts": WORLD.alerts})
         elif path == "/resource":
@@ -580,8 +611,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/units":
             self._serve_units()
         elif path == "/chunks":
-            surface = self._query().get("surface", "nauvis")
-            self._send_json(WORLD.get_index(surface) or {"surface": surface, "chunks": [], "size": 64})
+            self._serve_region(INDEX, remember=True)
         elif path.startswith("/tile/"):
             self._serve_tile(path)
         elif path == "/events":
@@ -597,6 +627,27 @@ class Handler(BaseHTTPRequestHandler):
             if key:
                 query[key] = value
         return query
+
+    def _serve_region(self, cache, remember):
+        query = self._query()
+        surface = query.get("surface", "nauvis")
+        try:
+            box = (int(float(query.get("x1", -8))), int(float(query.get("y1", -8))),
+                   int(float(query.get("x2", 8))), int(float(query.get("y2", 8))))
+        except ValueError:
+            return self.send_error(400, "region needs chunk coordinates x1, y1, x2, y2")
+        try:
+            payload = cache.get(surface, box)
+        except (OSError, RconError, ValueError) as error:
+            return self._send_json({"chunks": [], "error": str(error)})
+
+        if remember:
+            # Tile serving refuses anything not known to be charted, so feed
+            # what the game just told us back into that gate.
+            chunks = payload["chunks"]
+            for position in range(0, len(chunks) - 2, 3):
+                WORLD.note_charted(surface, chunks[position], chunks[position + 1], chunks[position + 2])
+        self._send_json(payload)
 
     def _serve_resource(self):
         query = self._query()

@@ -376,24 +376,60 @@ commands.add_command("chartorio_palette", "Colour table for every tile and entit
   respond({colors = colors})
 end)
 
-commands.add_command("chartorio_chunks", "Charted chunks and their revisions.", function(command)
+-- Charted chunks inside a rectangle of chunk coordinates. A world wide scan
+-- is not an option: a played save holds tens of thousands of chunks and
+-- walking all of them blows straight through the RCON timeout.
+local MAX_INDEX_CHUNKS = 6000
+
+commands.add_command("chartorio_chunks", "Charted chunks in view: chartorio_chunks <surface> <cx1> <cy1> <cx2> <cy2>.", function(command)
   initialise()
-  local surface = game.surfaces[command.parameter or "nauvis"]
-  if not surface then return respond({error = "unknown surface"}) end
-  local force = game.forces.player
-  local chunks = {}
-  for chunk in surface.get_chunks() do
-    if force.is_chunk_charted(surface, {chunk.x, chunk.y}) then
-      local key = chunk_key(surface.name, chunk.x, chunk.y)
-      chunks[#chunks + 1] = {chunk.x, chunk.y, storage.chartorio.revisions[key] or 0}
+  local surface_name, x1, y1, x2, y2 = string.match(
+    command.parameter or "", "^(%S+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)$")
+  local surface = surface_name and game.surfaces[surface_name]
+  if not surface then
+    return respond({error = "usage: chartorio_chunks <surface> <cx1> <cy1> <cx2> <cy2>"})
+  end
+  x1, y1, x2, y2 = tonumber(x1), tonumber(y1), tonumber(x2), tonumber(y2)
+  if x2 < x1 then x1, x2 = x2, x1 end
+  if y2 < y1 then y1, y2 = y2, y1 end
+
+  -- Clamp around the centre rather than refusing, so a zoomed out browser
+  -- still gets the middle of what it asked for.
+  local clamped = false
+  while (x2 - x1 + 1) * (y2 - y1 + 1) > MAX_INDEX_CHUNKS do
+    clamped = true
+    if (x2 - x1) >= (y2 - y1) then
+      x1, x2 = x1 + 1, x2 - 1
+    else
+      y1, y2 = y1 + 1, y2 - 1
     end
   end
-  -- The seed identifies this generated world, so caches can tell a new map
-  -- from the old one even though chunk coordinates repeat.
+
   local seed = 0
   local settings = surface.map_gen_settings
   if settings and settings.seed then seed = settings.seed end
-  respond({surface = surface.name, size = CHUNK_SIZE * SUBPIXELS, seed = seed, chunks = chunks})
+
+  local force = game.forces.player
+  local revisions = storage.chartorio.revisions
+  local chunks = {}
+  for chunk_y = y1, y2 do
+    for chunk_x = x1, x2 do
+      if force.is_chunk_charted(surface, {chunk_x, chunk_y}) then
+        chunks[#chunks + 1] = chunk_x
+        chunks[#chunks + 1] = chunk_y
+        chunks[#chunks + 1] = revisions[chunk_key(surface.name, chunk_x, chunk_y)] or 0
+      end
+    end
+  end
+
+  respond({
+    surface = surface.name,
+    size = CHUNK_SIZE * SUBPIXELS,
+    seed = seed,
+    clamped = clamped,
+    area = {x1, y1, x2, y2},
+    chunks = chunks,
+  })
 end)
 
 commands.add_command("chartorio_chunk", "Raster one chunk: chartorio_chunk <surface> <x> <y>.", function(command)
@@ -586,24 +622,34 @@ commands.add_command("chartorio_tags", "Map tags placed in game: chartorio_tags 
   respond({surface = surface.name, tags = tags})
 end)
 
-commands.add_command("chartorio_pollution", "Pollution per charted chunk: chartorio_pollution <surface>.", function(command)
+commands.add_command("chartorio_pollution", "Pollution in view: chartorio_pollution <surface> <cx1> <cy1> <cx2> <cy2>.", function(command)
   initialise()
-  local surface = game.surfaces[command.parameter or "nauvis"]
-  if not surface then return respond({error = "unknown surface"}) end
+  local surface_name, x1, y1, x2, y2 = string.match(
+    command.parameter or "", "^(%S+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)$")
+  local surface = surface_name and game.surfaces[surface_name]
+  if not surface then
+    return respond({error = "usage: chartorio_pollution <surface> <cx1> <cy1> <cx2> <cy2>"})
+  end
+  x1, y1, x2, y2 = tonumber(x1), tonumber(y1), tonumber(x2), tonumber(y2)
+  if x2 < x1 then x1, x2 = x2, x1 end
+  if y2 < y1 then y1, y2 = y2, y1 end
+  while (x2 - x1 + 1) * (y2 - y1 + 1) > MAX_INDEX_CHUNKS do
+    if (x2 - x1) >= (y2 - y1) then x1, x2 = x1 + 1, x2 - 1 else y1, y2 = y1 + 1, y2 - 1 end
+  end
+
   local force = game.forces.player
   local values = {}
   local peak = 0
-  local scanned = 0
-  for chunk in surface.get_chunks() do
-    if scanned >= 4000 then break end
-    if force.is_chunk_charted(surface, {chunk.x, chunk.y}) then
-      scanned = scanned + 1
-      local amount = surface.get_pollution({chunk.x * CHUNK_SIZE + 16, chunk.y * CHUNK_SIZE + 16})
-      if amount > 1 then
-        values[#values + 1] = chunk.x
-        values[#values + 1] = chunk.y
-        values[#values + 1] = math.floor(amount)
-        if amount > peak then peak = amount end
+  for chunk_y = y1, y2 do
+    for chunk_x = x1, x2 do
+      if force.is_chunk_charted(surface, {chunk_x, chunk_y}) then
+        local amount = surface.get_pollution({chunk_x * CHUNK_SIZE + 16, chunk_y * CHUNK_SIZE + 16})
+        if amount > 1 then
+          values[#values + 1] = chunk_x
+          values[#values + 1] = chunk_y
+          values[#values + 1] = math.floor(amount)
+          if amount > peak then peak = amount end
+        end
       end
     end
   end

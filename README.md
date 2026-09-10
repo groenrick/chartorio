@@ -10,9 +10,10 @@ scenario script, which travels to clients with the map when they join. Your
 players connect to a vanilla-compatible server and never see a checksum
 mismatch.
 
-![The tile layer of a live server](docs/example-render.png)
+![A real base rendered by Chartorio](docs/example-render.png)
 
-*Every charted chunk of a running server, rendered from prototype map colours.*
+*A running server's world: rail network, factory blocks, ore, nests in red, and
+the ragged edge where the charted area stops.*
 
 ## What it shows
 
@@ -62,11 +63,16 @@ Chunks are only re-rendered when the game reports them changed: build, mine and
 chart events mark a chunk dirty, and the bridge drops that tile and every
 zoomed-out tile above it.
 
+**Nothing ever walks the whole map.** A played save holds tens of thousands of
+chunks, and a world-wide scan does not fit inside an RCON round trip. The chunk
+index, pollution and biters are all asked for per viewport, bounded server side,
+and the browser re-asks as you pan.
+
 ### Zoom levels
 
 ![Native tiles next to one zoomed out tile](docs/zoom-levels.png)
 
-*Left: sixteen native tiles. Right: the same area as a single zoom-2 tile.*
+*Left: sixteen native tiles. Right: the same area as one zoom-2 tile.*
 
 One tile per chunk is fine at spawn and hopeless across a real base. Zoom
 levels 1 to 3 combine 2×2, 4×4 and 8×8 chunks into one tile, built by halving
@@ -135,11 +141,12 @@ All settings are environment variables on the bridge service.
 | `/` | the map page |
 | `/events` | server-sent events: `state`, `tiles`, `index`, `tags`, `pollution`, `alerts` |
 | `/state` | players, trains, tick |
-| `/chunks?surface=` | charted chunks with revisions, tile size, map seed |
+| `/chunks?surface=&x1=&y1=&x2=&y2=` | charted chunks in a rectangle of **chunk** coordinates, with revisions, tile size and map seed |
 | `/tile/<surface>/<z>/<x>/<y>.png` | a tile; `z` may be omitted for native |
 | `/units?surface=&x1=&y1=&x2=&y2=` | biters inside a viewport, vision filtered |
 | `/resource?surface=&x=&y=` | patch total under a point |
-| `/tags`, `/pollution`, `/alerts` | the matching overlay data |
+| `/pollution?surface=&x1=&y1=&x2=&y2=` | pollution per charted chunk in that rectangle |
+| `/tags`, `/alerts` | map tags and recent losses |
 
 ## Limitations
 
