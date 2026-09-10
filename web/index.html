@@ -1,0 +1,1320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chartorio</title>
+<style>
+  :root {
+    --bg: #14100c;
+    --panel: #1c1712;
+    --border: #3a2f24;
+    --text: #e8dcc8;
+    --muted: #9a8b76;
+    --accent: #ff9d2e;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    overflow: hidden;
+  }
+  #map { position: fixed; inset: 0; cursor: grab; touch-action: none; }
+  #map.dragging { cursor: grabbing; }
+
+  #panel {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    width: 258px;
+    max-height: calc(100vh - 24px);
+    display: flex;
+    flex-direction: column;
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    backdrop-filter: blur(6px);
+    overflow: hidden;
+  }
+  header { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  h1 {
+    margin: 0;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .status { margin-top: 4px; color: var(--muted); font-size: 11px; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .dot.up { background: #7bc96f; }
+  .dot.down { background: #e05c5c; }
+
+  .scroll { overflow-y: auto; }
+  section { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  section:last-child { border-bottom: 0; }
+  h2 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 400;
+  }
+  ul { margin: 0; padding: 0; list-style: none; }
+  li {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  li:hover { background: #2a221a; }
+  li.followed { background: #33291d; outline: 1px solid var(--accent); }
+  .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { color: var(--muted); font-size: 11px; }
+  .empty { color: var(--muted); font-style: italic; padding: 2px 4px; }
+
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    cursor: pointer;
+  }
+  .toggle input { accent-color: var(--accent); margin: 0; }
+  .note {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .legend-group { margin-bottom: 8px; }
+  .legend-group:last-child { margin-bottom: 0; }
+  .legend-title {
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 3px;
+  }
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    cursor: crosshair;
+  }
+  .legend-row:hover, .legend-row.active { background: #2a221a; color: #fff; }
+  .legend-row.active { outline: 1px solid var(--accent); }
+  .legend-row.dead { cursor: default; opacity: 0.45; }
+  .legend-row.dead:hover { background: none; color: inherit; }
+  .legend-row .label { flex: 1; }
+  .chip { width: 10px; height: 10px; border-radius: 2px; flex: none; border: 1px solid rgba(0, 0, 0, 0.5); }
+  .chip.round { border-radius: 50%; }
+
+  #tooltip {
+    position: fixed;
+    z-index: 5;
+    pointer-events: none;
+    padding: 6px 9px;
+    background: color-mix(in srgb, var(--panel) 95%, transparent);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: nowrap;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  }
+  #tooltip .amount { color: var(--accent); font-weight: 600; }
+  #tooltip .sub { color: var(--muted); font-size: 11px; }
+
+  #hud {
+    position: fixed;
+    right: 12px;
+    bottom: 12px;
+    padding: 6px 10px;
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  kbd {
+    background: #2a221a;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 4px;
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+<canvas id="map"></canvas>
+
+<aside id="panel">
+  <header>
+    <h1>Chartorio</h1>
+    <div class="status"><span id="status-dot" class="dot down"></span><span id="status-text">connecting…</span></div>
+  </header>
+  <div class="scroll">
+    <section>
+      <h2>Players (<span id="player-count">0</span>)</h2>
+      <ul id="players"></ul>
+    </section>
+    <section>
+      <h2>Trains (<span id="train-count">0</span>)</h2>
+      <ul id="trains"></ul>
+    </section>
+    <section>
+      <h2>Layers</h2>
+      <label class="toggle"><input type="checkbox" id="layer-terrain" checked> terrain</label>
+      <label class="toggle"><input type="checkbox" id="layer-biters" checked> biters <span class="meta" id="biter-count">0</span></label>
+      <label class="toggle"><input type="checkbox" id="layer-trains" checked> trains</label>
+      <label class="toggle"><input type="checkbox" id="layer-players" checked> players</label>
+      <label class="toggle"><input type="checkbox" id="layer-tags" checked> map tags <span class="meta" id="tag-count">0</span></label>
+      <label class="toggle"><input type="checkbox" id="layer-alerts" checked> alerts</label>
+      <label class="toggle"><input type="checkbox" id="layer-pollution"> pollution</label>
+      <div class="note">Nests sit in the terrain layer, so they stay visible once charted. Moving biters need current radar or player vision, exactly like the in-game map.</div>
+    </section>
+    <section>
+      <h2>Legend</h2>
+      <div id="legend"></div>
+    </section>
+    <section>
+      <h2>Alerts</h2>
+      <ul id="alerts"></ul>
+    </section>
+    <section>
+      <h2>Map</h2>
+      <div class="meta"><span id="chunk-count">0</span> charted chunks · <span id="tile-loaded">0</span> tiles drawn</div>
+      <div class="meta">zoom level <span id="zoom-level">0</span> · pollution peak <span id="pollution-peak">0</span></div>
+    </section>
+  </div>
+</aside>
+
+<div id="tooltip" hidden></div>
+
+<div id="hud">
+  <span id="cursor">0, 0</span> &nbsp;·&nbsp; <span id="zoom">2.0</span> px/tile &nbsp;·&nbsp; drag to pan, scroll to zoom, <kbd>esc</kbd> unfollow
+</div>
+
+<script>
+const CHUNK_TILES = 32;
+const SURFACE = "nauvis";
+
+// Legend hover spotlight: how far unmatched pixels drop, and how far matched
+// ones are pushed towards white.
+const SPOTLIGHT_DIM = 0.68;
+const SPOTLIGHT_LIFT = 0.45;
+const OVERLAY_DIM_ALPHA = 0.3;
+
+const TRAIN_STATE_COLORS = {
+  on_the_path: "#7bc96f",
+  arrive_signal: "#d9c04a",
+  wait_signal: "#d9c04a",
+  arrive_station: "#5fa8e0",
+  wait_station: "#5fa8e0",
+  manual_control: "#c08ae0",
+  manual_control_stop: "#c08ae0",
+  no_path: "#e05c5c",
+  no_schedule: "#8a7d6d",
+  destination_full: "#e08a3c",
+};
+
+const canvas = document.getElementById("map");
+const context = canvas.getContext("2d");
+
+const view = { x: 0, y: 0, scale: 2 };
+let state = { connected: false, players: [], trains: [] };
+let charted = new Map();        // "x,y" -> revision
+let tiles = new Map();          // "x,y" -> { image, revision, ready }
+let follow = null;
+let pendingFrame = false;
+let units = [];                 // flat [x, y, x, y, ...] of visible biters
+let unitsTruncated = false;
+let palette = {};               // "e:iron-ore" -> [r, g, b]
+
+const MAX_ZOOM = 3;
+const layers = {
+  terrain: true, biters: true, trains: true, players: true,
+  pollution: false, tags: true, alerts: true,
+};
+let zoomIndex = [];             // per zoom level: tile key -> summed revision
+let tags = [];
+let pollution = { peak: 0, chunks: [] };
+let alerts = [];
+let highlight = null;           // legend row the pointer is on, drives the spotlight
+let tileGeneration = 0;         // bumped whenever the tile layer changes
+let spotlightCache = null;      // { key, image } so a static hover costs one pass
+let tilePixels = 64;            // pixels per chunk tile, reported by /chunks
+let worldSeed = 0;              // identifies the generated world, busts tile caches
+let legendRows = [];            // { row, element } so map hover can light a row up
+let colorRowIndex = new Map();  // packed colour -> legend row, rebuilt with the palette
+let colorKeyIndex = new Map();  // packed colour -> palette key, for resource lookups
+
+function key(x, y) { return x + "," + y; }
+
+// The panel covers the left edge, so the anchor point is the middle of what
+// is actually visible next to it. Everything that means "centre" hangs off
+// this: following a player, and which tiles load first. On a narrow window
+// the panel covers too much to offset against, so fall back to the middle.
+let centerPoint = { x: 0, y: 0 };
+
+function updateCenterPoint() {
+  const panel = document.getElementById("panel");
+  const gutter = panel ? panel.getBoundingClientRect().right + 12 : 0;
+  const usable = window.innerWidth - gutter;
+  centerPoint = (usable < 240)
+    ? { x: window.innerWidth / 2, y: window.innerHeight / 2 }
+    : { x: gutter + usable / 2, y: window.innerHeight / 2 };
+}
+
+function worldToScreen(x, y) {
+  return {
+    x: (x - view.x) * view.scale + centerPoint.x,
+    y: (y - view.y) * view.scale + centerPoint.y,
+  };
+}
+
+function screenToWorld(x, y) {
+  return {
+    x: (x - centerPoint.x) / view.scale + view.x,
+    y: (y - centerPoint.y) / view.scale + view.y,
+  };
+}
+
+function requestDraw() {
+  if (pendingFrame) return;
+  pendingFrame = true;
+  requestAnimationFrame(() => {
+    pendingFrame = false;
+    draw();
+  });
+}
+
+function resize() {
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(window.innerWidth * ratio);
+  canvas.height = Math.floor(window.innerHeight * ratio);
+  canvas.style.width = window.innerWidth + "px";
+  canvas.style.height = window.innerHeight + "px";
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.imageSmoothingEnabled = false;
+  updateCenterPoint();
+  requestDraw();
+}
+
+// Tiles are fetched lazily: only chunks that are both charted and on screen.
+// Requests run through a small queue that is re-sorted on every draw, so the
+// chunks nearest the middle of the view load first and panning re-aims the
+// queue instead of waiting for a stale row-by-row sweep to finish.
+// A zoomed out tile exists when any chunk under it is charted. Its revision is
+// the sum of theirs, so any change beneath it produces a new URL.
+function rebuildZoomIndex() {
+  zoomIndex = [];
+  for (let zoom = 0; zoom <= MAX_ZOOM; zoom++) zoomIndex.push(new Map());
+  for (const [id, revision] of charted) {
+    const [x, y] = id.split(",").map(Number);
+    for (let zoom = 0; zoom <= MAX_ZOOM; zoom++) {
+      const tileKey = key(x >> zoom, y >> zoom);
+      const map = zoomIndex[zoom];
+      map.set(tileKey, (map.get(tileKey) || 0) + revision + 1);
+    }
+  }
+}
+
+// Keep roughly 40 screen pixels per tile: past that a native tile is wasted
+// detail and a request per chunk, which is what the zoom levels exist to avoid.
+function zoomForScale() {
+  const chunkPixels = CHUNK_TILES * view.scale;
+  if (chunkPixels >= 40) return 0;
+  if (chunkPixels >= 20) return 1;
+  if (chunkPixels >= 10) return 2;
+  return MAX_ZOOM;
+}
+
+const MAX_TILE_REQUESTS = 6;
+let tileQueue = [];
+let tilesInFlight = 0;
+
+function updateTileCounter() {
+  document.getElementById("tile-loaded").textContent =
+    [...tiles.values()].filter((tile) => tile.ready).length;
+}
+
+function tileEntry(zoom, tileX, tileY) {
+  const id = `${zoom}:${tileX},${tileY}`;
+  const revision = zoomIndex[zoom] && zoomIndex[zoom].get(key(tileX, tileY));
+  if (revision === undefined) return null;
+
+  const cached = tiles.get(id);
+  if (cached && cached.revision === revision) return cached;
+
+  const entry = { id, zoom, x: tileX, y: tileY, revision, image: null, ready: false, state: "queued" };
+  tiles.set(id, entry);
+  return entry;
+}
+
+function startTile(entry) {
+  if (entry.state !== "queued") return;
+  entry.state = "loading";
+  tilesInFlight++;
+
+  const image = new Image();
+  entry.image = image;
+  image.onload = () => {
+    entry.ready = true;
+    entry.state = "ready";
+    tileGeneration++;
+    tilesInFlight--;
+    updateTileCounter();
+    pumpTiles();
+    requestDraw();
+  };
+  image.onerror = () => {
+    tiles.delete(entry.id);
+    tilesInFlight--;
+    pumpTiles();
+  };
+  image.src = `/tile/${SURFACE}/${entry.zoom}/${entry.x}/${entry.y}.png?r=${entry.revision}&w=${worldSeed}`;
+}
+
+function pumpTiles() {
+  while (tilesInFlight < MAX_TILE_REQUESTS && tileQueue.length) {
+    startTile(tileQueue.shift());
+  }
+}
+
+function drawTiles() {
+  const zoom = zoomForScale();
+  const span = CHUNK_TILES * (1 << zoom);          // world tiles covered by one tile
+  const topLeft = screenToWorld(0, 0);
+  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
+  const fromX = Math.floor(topLeft.x / span) - 1;
+  const toX = Math.floor(bottomRight.x / span) + 1;
+  const fromY = Math.floor(topLeft.y / span) - 1;
+  const toY = Math.floor(bottomRight.y / span) + 1;
+  const size = span * view.scale;
+  const pending = [];
+
+  for (let tileY = fromY; tileY <= toY; tileY++) {
+    for (let tileX = fromX; tileX <= toX; tileX++) {
+      const entry = tileEntry(zoom, tileX, tileY);
+      if (!entry) continue;
+      if (entry.ready) {
+        const origin = worldToScreen(tileX * span, tileY * span);
+        context.drawImage(entry.image, Math.floor(origin.x), Math.floor(origin.y),
+                          Math.ceil(size) + 1, Math.ceil(size) + 1);
+      } else if (entry.state === "queued") {
+        const centerX = (tileX + 0.5) * span - view.x;
+        const centerY = (tileY + 0.5) * span - view.y;
+        entry.distance = centerX * centerX + centerY * centerY;
+        pending.push(entry);
+      }
+    }
+  }
+
+  tileQueue = pending.sort((a, b) => a.distance - b.distance);
+  pumpTiles();
+  document.getElementById("zoom-level").textContent = zoom;
+}
+
+function drawGrid() {
+  if (view.scale < 0.8) return;
+  const topLeft = screenToWorld(0, 0);
+  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
+  context.strokeStyle = "rgba(255, 255, 255, 0.05)";
+  context.lineWidth = 1;
+  for (let x = Math.floor(topLeft.x / CHUNK_TILES) * CHUNK_TILES; x < bottomRight.x; x += CHUNK_TILES) {
+    const screen = worldToScreen(x, 0);
+    context.beginPath();
+    context.moveTo(Math.round(screen.x) + 0.5, 0);
+    context.lineTo(Math.round(screen.x) + 0.5, window.innerHeight);
+    context.stroke();
+  }
+  for (let y = Math.floor(topLeft.y / CHUNK_TILES) * CHUNK_TILES; y < bottomRight.y; y += CHUNK_TILES) {
+    const screen = worldToScreen(0, y);
+    context.beginPath();
+    context.moveTo(0, Math.round(screen.y) + 0.5);
+    context.lineTo(window.innerWidth, Math.round(screen.y) + 0.5);
+    context.stroke();
+  }
+}
+
+function toCss(color) {
+  if (!color) return "#ff9d2e";
+  const channel = (value) => Math.round(Math.min(1, Math.max(0, value || 0)) * 255);
+  return `rgb(${channel(color.r)}, ${channel(color.g)}, ${channel(color.b)})`;
+}
+
+function drawTrains() {
+  for (const train of state.trains) {
+    const screen = worldToScreen(train.x, train.y);
+    const color = TRAIN_STATE_COLORS[train.state] || "#8a7d6d";
+    const length = Math.max(6, 6 * view.scale);
+    const width = Math.max(3, 2.4 * view.scale);
+
+    context.save();
+    context.translate(screen.x, screen.y);
+    context.rotate((train.orientation || 0) * Math.PI * 2);
+    context.fillStyle = color;
+    context.strokeStyle = "rgba(0, 0, 0, 0.6)";
+    context.lineWidth = 1;
+    context.fillRect(-width / 2, -length / 2, width, length);
+    context.strokeRect(-width / 2, -length / 2, width, length);
+    context.restore();
+
+    if (view.scale >= 1.5) {
+      context.fillStyle = "#cbbba2";
+      context.font = "10px ui-monospace, monospace";
+      context.textAlign = "center";
+      context.fillText(train.destination || train.state, screen.x, screen.y - length / 2 - 4);
+    }
+  }
+}
+
+function drawPlayers() {
+  for (const player of state.players) {
+    const screen = worldToScreen(player.x, player.y);
+    const radius = Math.max(4, Math.min(9, 2 * view.scale));
+
+    context.beginPath();
+    context.arc(screen.x, screen.y, radius + 4, 0, Math.PI * 2);
+    context.fillStyle = "rgba(255, 157, 46, 0.18)";
+    context.fill();
+
+    context.beginPath();
+    context.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+    context.fillStyle = toCss(player.color);
+    context.fill();
+    context.lineWidth = 1.5;
+    context.strokeStyle = "#14100c";
+    context.stroke();
+
+    context.font = "11px ui-monospace, monospace";
+    context.textAlign = "center";
+    context.lineWidth = 3;
+    context.strokeStyle = "rgba(0, 0, 0, 0.75)";
+    context.strokeText(player.name, screen.x, screen.y - radius - 6);
+    context.fillStyle = "#e8dcc8";
+    context.fillText(player.name, screen.x, screen.y - radius - 6);
+  }
+}
+
+function drawUnits() {
+  const radius = Math.max(1.5, Math.min(5, 0.9 * view.scale));
+  context.fillStyle = "#ff1919";
+  context.strokeStyle = "rgba(0, 0, 0, 0.55)";
+  context.lineWidth = 1;
+  for (let index = 0; index < units.length; index += 2) {
+    const screen = worldToScreen(units[index], units[index + 1]);
+    context.beginPath();
+    context.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+    context.fill();
+    if (radius > 2.5) context.stroke();
+  }
+}
+
+// Tiles are painted in palette colours, so a pixel's colour is its identity.
+// That lets a legend hover spotlight a category without asking the game
+// anything: keep the matching pixels, push everything else down.
+function spotlightColors(packedColors, cacheKey) {
+  const width = canvas.width;
+  const height = canvas.height;
+  if (!width || !height) return;
+
+  const fullKey = [cacheKey, tileGeneration, width, height,
+                   view.x.toFixed(3), view.y.toFixed(3), view.scale.toFixed(4),
+                   centerPoint.x.toFixed(1), centerPoint.y.toFixed(1)].join("|");
+  if (spotlightCache && spotlightCache.key === fullKey) {
+    context.putImageData(spotlightCache.image, 0, 0);
+    return;
+  }
+
+  const image = context.getImageData(0, 0, width, height);
+  const pixels = new Uint32Array(image.data.buffer);
+  for (let index = 0; index < pixels.length; index++) {
+    const pixel = pixels[index];
+    if (packedColors.has(pixel & 0x00ffffff)) {
+      const red = pixel & 0xff;
+      const green = (pixel >> 8) & 0xff;
+      const blue = (pixel >> 16) & 0xff;
+      pixels[index] = (pixel & 0xff000000)
+        | (red + ((255 - red) * SPOTLIGHT_LIFT)) & 0xff
+        | (((green + ((255 - green) * SPOTLIGHT_LIFT)) & 0xff) << 8)
+        | (((blue + ((255 - blue) * SPOTLIGHT_LIFT)) & 0xff) << 16);
+    } else {
+      pixels[index] = (pixel & 0xff000000)
+        | ((pixel & 0xff) * SPOTLIGHT_DIM) & 0xff
+        | (((((pixel >> 8) & 0xff) * SPOTLIGHT_DIM) & 0xff) << 8)
+        | (((((pixel >> 16) & 0xff) * SPOTLIGHT_DIM) & 0xff) << 16);
+    }
+  }
+  context.putImageData(image, 0, 0);
+  spotlightCache = { key: fullKey, image };
+}
+
+function dimMap() {
+  context.fillStyle = `rgba(10, 8, 6, ${OVERLAY_DIM_ALPHA})`;
+  context.fillRect(0, 0, window.innerWidth, window.innerHeight);
+}
+
+function packedHighlightColors(row) {
+  const packed = new Set();
+  const add = (r, g, b) => packed.add((r | (g << 8) | (b << 16)) >>> 0);
+  if (row.match) {
+    for (const [key, color] of Object.entries(palette)) {
+      if (row.match(key)) add(color[0], color[1], color[2]);
+    }
+  }
+  if (packed.size === 0 && row.fallback) {
+    const hex = row.fallback.replace("#", "");
+    add(parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16));
+  }
+  return packed;
+}
+
+// Reading the canvas would return whatever the spotlight already did to it,
+// so sample the untouched tile image instead. One decode per tile, cached.
+const sampleCanvas = document.createElement("canvas");
+const sampleContext = sampleCanvas.getContext("2d", { willReadFrequently: true });
+
+function tilePixelData(entry) {
+  if (entry.pixels) return entry.pixels;
+  if (!entry.ready) return null;
+  sampleCanvas.width = tilePixels;
+  sampleCanvas.height = tilePixels;
+  sampleContext.clearRect(0, 0, tilePixels, tilePixels);
+  sampleContext.drawImage(entry.image, 0, 0);
+  try {
+    const data = sampleContext.getImageData(0, 0, tilePixels, tilePixels);
+    entry.pixels = new Uint32Array(data.data.buffer.slice(0));
+  } catch (error) {
+    return null;
+  }
+  return entry.pixels;
+}
+
+function sampleWorldColor(worldX, worldY) {
+  const zoom = zoomForScale();
+  const span = CHUNK_TILES * (1 << zoom);
+  const tileX = Math.floor(worldX / span);
+  const tileY = Math.floor(worldY / span);
+  const entry = tiles.get(`${zoom}:${tileX},${tileY}`);
+  if (!entry || !entry.ready) return null;
+  const data = tilePixelData(entry);
+  if (!data) return null;
+  const scale = tilePixels / span;
+  const localX = Math.floor((worldX - tileX * span) * scale);
+  const localY = Math.floor((worldY - tileY * span) * scale);
+  if (localX < 0 || localY < 0 || localX >= tilePixels || localY >= tilePixels) return null;
+  const pixel = data[localY * tilePixels + localX];
+  if ((pixel >>> 24) === 0) return null;      // transparent: unexplored ground
+  return pixel & 0x00ffffff;
+}
+
+// Built once per palette load: scanning every palette entry on every mouse
+// move would not survive a factory with thousands of prototypes on the map.
+function buildColorRowIndex() {
+  colorRowIndex = new Map();
+  colorKeyIndex = new Map();
+  for (const [paletteKey, color] of Object.entries(palette)) {
+    const packed = (color[0] | (color[1] << 8) | (color[2] << 16)) >>> 0;
+    if (!colorKeyIndex.has(packed)) colorKeyIndex.set(packed, paletteKey);
+    if (colorRowIndex.has(packed)) continue;
+    for (const group of LEGEND) {
+      let found = null;
+      for (const row of group.rows) {
+        if (row.match && row.match(paletteKey)) { found = row; break; }
+      }
+      if (found) { colorRowIndex.set(packed, found); break; }
+    }
+  }
+}
+
+function rowForPacked(packed) {
+  return colorRowIndex.get(packed) || null;
+}
+
+function legendRowByLabel(label) {
+  for (const group of LEGEND) {
+    for (const row of group.rows) {
+      if (row.label === label) return row;
+    }
+  }
+  return null;
+}
+
+function setActiveLegendRow(row) {
+  for (const item of legendRows) {
+    item.element.classList.toggle("active", Boolean(row) && item.row === row);
+  }
+}
+
+// What is under the cursor: overlay markers win, then the baked terrain.
+function pickAt(clientX, clientY) {
+  const world = screenToWorld(clientX, clientY);
+
+  if (layers.players) {
+    for (const player of state.players) {
+      const screen = worldToScreen(player.x, player.y);
+      if (Math.hypot(screen.x - clientX, screen.y - clientY) <= 12) {
+        return { row: legendRowByLabel("player"), name: player.name };
+      }
+    }
+  }
+  if (layers.trains) {
+    for (const train of state.trains) {
+      const screen = worldToScreen(train.x, train.y);
+      if (Math.hypot(screen.x - clientX, screen.y - clientY) <= 12) {
+        for (const group of LEGEND) {
+          for (const row of group.rows) {
+            if (row.highlight === "trains" && row.states.includes(train.state)) {
+              return { row, name: `train #${train.id} ${train.state}` };
+            }
+          }
+        }
+      }
+    }
+  }
+  if (layers.biters) {
+    for (let index = 0; index < units.length; index += 2) {
+      const screen = worldToScreen(units[index], units[index + 1]);
+      if (Math.hypot(screen.x - clientX, screen.y - clientY) <= 10) {
+        return { row: legendRowByLabel("biter (radar only)"), name: "biter" };
+      }
+    }
+  }
+  if (layers.terrain) {
+    const packed = sampleWorldColor(world.x, world.y);
+    if (packed !== null) {
+      const row = rowForPacked(packed);
+      if (row) {
+        return {
+          row,
+          name: row.label,
+          tile: { x: Math.floor(world.x), y: Math.floor(world.y) },
+          paletteKey: colorKeyIndex.get(packed),
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function markerRing(x, y, radius, color) {
+  context.beginPath();
+  context.arc(x, y, radius, 0, Math.PI * 2);
+  context.strokeStyle = color;
+  context.lineWidth = 2;
+  context.stroke();
+}
+
+function drawPollution() {
+  if (!pollution.chunks.length || !pollution.peak) return;
+  const size = CHUNK_TILES * view.scale;
+  for (let index = 0; index < pollution.chunks.length; index += 3) {
+    const chunkX = pollution.chunks[index];
+    const chunkY = pollution.chunks[index + 1];
+    const amount = pollution.chunks[index + 2];
+    const share = Math.min(1, amount / pollution.peak);
+    const origin = worldToScreen(chunkX * CHUNK_TILES, chunkY * CHUNK_TILES);
+    if (origin.x > window.innerWidth || origin.y > window.innerHeight ||
+        origin.x + size < 0 || origin.y + size < 0) continue;
+    // yellow through orange to red, alpha rising with the share of the peak
+    const red = 255;
+    const green = Math.round(210 - 180 * share);
+    context.fillStyle = `rgba(${red}, ${green}, 40, ${0.12 + 0.33 * share})`;
+    context.fillRect(origin.x, origin.y, Math.ceil(size) + 1, Math.ceil(size) + 1);
+  }
+}
+
+function drawTags() {
+  for (const tag of tags) {
+    const screen = worldToScreen(tag.x, tag.y);
+    context.beginPath();
+    context.moveTo(screen.x, screen.y);
+    context.lineTo(screen.x - 5, screen.y - 12);
+    context.lineTo(screen.x + 5, screen.y - 12);
+    context.closePath();
+    context.fillStyle = "#ffd479";
+    context.fill();
+
+    context.beginPath();
+    context.arc(screen.x, screen.y - 15, 5, 0, Math.PI * 2);
+    context.fillStyle = "#ffd479";
+    context.fill();
+    context.lineWidth = 1.5;
+    context.strokeStyle = "#14100c";
+    context.stroke();
+
+    if (tag.text && view.scale >= 0.6) {
+      context.font = "11px ui-monospace, monospace";
+      context.textAlign = "center";
+      context.lineWidth = 3;
+      context.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      context.strokeText(tag.text, screen.x, screen.y - 24);
+      context.fillStyle = "#ffe9b8";
+      context.fillText(tag.text, screen.x, screen.y - 24);
+    }
+  }
+}
+
+function drawAlerts() {
+  const now = state.tick || 0;
+  for (const alert of alerts) {
+    const ageSeconds = Math.max(0, (now - alert.tick) / 60);
+    if (ageSeconds > 120) continue;
+    const fade = 1 - ageSeconds / 120;
+    const screen = worldToScreen(alert.x, alert.y);
+    const radius = 6 + (1 - fade) * 14;
+    context.beginPath();
+    context.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+    context.strokeStyle = `rgba(255, 77, 77, ${0.25 + 0.6 * fade})`;
+    context.lineWidth = 2;
+    context.stroke();
+    context.beginPath();
+    context.arc(screen.x, screen.y, 3, 0, Math.PI * 2);
+    context.fillStyle = `rgba(255, 77, 77, ${0.4 + 0.6 * fade})`;
+    context.fill();
+  }
+}
+
+function draw() {
+  updateCenterPoint();
+  context.fillStyle = "#0f0c09";
+  context.fillRect(0, 0, window.innerWidth, window.innerHeight);
+  if (layers.terrain) drawTiles();
+
+  const spotlight = highlight && highlight.highlight;
+  if (spotlight === "color" && layers.terrain) {
+    spotlightColors(packedHighlightColors(highlight), highlight.label);
+  } else if (spotlight) {
+    dimMap();
+  }
+
+  if (layers.pollution) drawPollution();
+  drawGrid();
+  if (layers.biters) drawUnits();
+  if (layers.alerts) drawAlerts();
+  if (layers.trains) drawTrains();
+  if (layers.tags) drawTags();
+  if (layers.players) drawPlayers();
+
+  if (spotlight === "units" && layers.biters) {
+    for (let index = 0; index < units.length; index += 2) {
+      const screen = worldToScreen(units[index], units[index + 1]);
+      markerRing(screen.x, screen.y, Math.max(6, 1.6 * view.scale), "#ff5252");
+    }
+  }
+  if (spotlight === "players" && layers.players) {
+    for (const player of state.players) {
+      const screen = worldToScreen(player.x, player.y);
+      markerRing(screen.x, screen.y, Math.max(12, 3 * view.scale), "#ff9d2e");
+    }
+  }
+  if (spotlight === "tags" && layers.tags) {
+    for (const tag of tags) {
+      const screen = worldToScreen(tag.x, tag.y);
+      markerRing(screen.x, screen.y - 15, Math.max(10, 2.5 * view.scale), "#ffd479");
+    }
+  }
+  if (spotlight === "alerts" && layers.alerts) {
+    for (const alert of alerts) {
+      const screen = worldToScreen(alert.x, alert.y);
+      markerRing(screen.x, screen.y, Math.max(10, 2.5 * view.scale), "#ff4d4d");
+    }
+  }
+  if (spotlight === "trains" && layers.trains) {
+    for (const train of state.trains) {
+      if (!highlight.states.includes(train.state)) continue;
+      const screen = worldToScreen(train.x, train.y);
+      markerRing(screen.x, screen.y, Math.max(10, 3 * view.scale), highlight.fixed);
+    }
+  }
+
+  document.getElementById("zoom").textContent = view.scale.toFixed(2);
+}
+
+function followTarget() {
+  if (!follow) return;
+  const source = follow.kind === "player"
+    ? state.players.find((player) => player.name === follow.id)
+    : state.trains.find((train) => String(train.id) === String(follow.id));
+  if (source) {
+    view.x = source.x;
+    view.y = source.y;
+  }
+}
+
+function renderAlerts() {
+  const list = document.getElementById("alerts");
+  const now = state.tick || 0;
+  list.innerHTML = alerts.length ? "" : '<li class="empty">nothing lost yet</li>';
+  for (const alert of [...alerts].reverse().slice(0, 8)) {
+    const seconds = Math.max(0, Math.round((now - alert.tick) / 60));
+    const ago = seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
+    const item = document.createElement("li");
+    item.innerHTML = '<span class="swatch" style="background:#ff4d4d"></span>'
+      + '<span class="name"></span>'
+      + `<span class="meta">${ago}</span>`;
+    item.querySelector(".name").textContent =
+      alert.name.replace(/-/g, " ") + (alert.cause ? ` · ${alert.cause.replace(/-/g, " ")}` : "");
+    item.title = `${Math.round(alert.x)}, ${Math.round(alert.y)}`;
+    item.onclick = () => {
+      follow = null;
+      view.x = alert.x;
+      view.y = alert.y;
+      requestDraw();
+    };
+    list.appendChild(item);
+  }
+}
+
+function renderPanel() {
+  const statusDot = document.getElementById("status-dot");
+  const statusText = document.getElementById("status-text");
+  statusDot.className = "dot " + (state.connected ? "up" : "down");
+  statusText.textContent = state.connected
+    ? `online · tick ${state.tick ?? 0}`
+    : (state.error ? "server unreachable" : "connecting…");
+
+  const players = document.getElementById("players");
+  document.getElementById("player-count").textContent = state.players.length;
+  players.innerHTML = state.players.length ? "" : '<li class="empty">nobody online</li>';
+  for (const player of state.players) {
+    const item = document.createElement("li");
+    if (follow && follow.kind === "player" && follow.id === player.name) item.classList.add("followed");
+    item.innerHTML = `<span class="swatch" style="background:${toCss(player.color)}"></span>`
+      + `<span class="name"></span><span class="meta">${Math.round(player.x)}, ${Math.round(player.y)}</span>`;
+    item.querySelector(".name").textContent = player.name;
+    item.onclick = () => { follow = { kind: "player", id: player.name }; followTarget(); renderPanel(); requestDraw(); };
+    players.appendChild(item);
+  }
+
+  const trains = document.getElementById("trains");
+  document.getElementById("train-count").textContent = state.trains.length;
+  trains.innerHTML = state.trains.length ? "" : '<li class="empty">no trains</li>';
+  for (const train of state.trains) {
+    const item = document.createElement("li");
+    if (follow && follow.kind === "train" && String(follow.id) === String(train.id)) item.classList.add("followed");
+    item.innerHTML = `<span class="swatch" style="background:${TRAIN_STATE_COLORS[train.state] || "#8a7d6d"}"></span>`
+      + `<span class="name"></span>`
+      + `<span class="meta">${Math.abs(Math.round((train.speed || 0) * 216))} km/h</span>`;
+    item.querySelector(".name").textContent = `#${train.id} ${train.destination || train.state}`;
+    item.onclick = () => { follow = { kind: "train", id: train.id }; followTarget(); renderPanel(); requestDraw(); };
+    trains.appendChild(item);
+  }
+
+  renderAlerts();
+}
+
+async function loadIndex() {
+  try {
+    const response = await fetch(`/chunks?surface=${SURFACE}`);
+    const payload = await response.json();
+    if (payload.size) tilePixels = payload.size;
+    if (payload.seed !== undefined && payload.seed !== worldSeed) {
+      worldSeed = payload.seed;      // a regenerated map reuses chunk coordinates
+      tiles.clear();
+      tileQueue = [];
+      spotlightCache = null;
+      tileGeneration++;
+    }
+    charted = new Map((payload.chunks || []).map(([x, y, revision]) => [key(x, y), revision]));
+    rebuildZoomIndex();
+    document.getElementById("chunk-count").textContent = charted.size;
+    requestDraw();
+  } catch (error) {
+    /* the poller will try again */
+  }
+}
+
+let dragging = false;
+let dragStart = null;
+
+canvas.addEventListener("pointerdown", (event) => {
+  dragging = true;
+  dragStart = { x: event.clientX, y: event.clientY, viewX: view.x, viewY: view.y };
+  canvas.classList.add("dragging");
+  canvas.setPointerCapture(event.pointerId);
+});
+
+let hoverName = null;
+let resourceRequest = null;     // { chunk, timer } so one patch is asked for once
+let resourceShown = null;       // chunk key currently in the tooltip
+
+function formatAmount(value) {
+  if (value >= 1e9) return (value / 1e9).toFixed(2) + "G";
+  if (value >= 1e6) return (value / 1e6).toFixed(2) + "M";
+  if (value >= 1e3) return (value / 1e3).toFixed(1) + "k";
+  return String(Math.round(value));
+}
+
+function hideTooltip() {
+  document.getElementById("tooltip").hidden = true;
+  resourceShown = null;
+  if (resourceRequest) {
+    clearTimeout(resourceRequest.timer);
+    resourceRequest = null;
+  }
+}
+
+function placeTooltip(clientX, clientY) {
+  const tooltip = document.getElementById("tooltip");
+  if (tooltip.hidden) return;
+  const rect = tooltip.getBoundingClientRect();
+  const left = Math.min(clientX + 14, window.innerWidth - rect.width - 8);
+  const top = Math.min(clientY + 16, window.innerHeight - rect.height - 8);
+  tooltip.style.left = Math.max(8, left) + "px";
+  tooltip.style.top = Math.max(8, top) + "px";
+}
+
+// The whole patch gives the same answer, so ask once per chunk and only after
+// the pointer settles for a moment.
+function requestResource(hit, clientX, clientY) {
+  const chunkKey = `${Math.floor(hit.tile.x / CHUNK_TILES)},${Math.floor(hit.tile.y / CHUNK_TILES)}`;
+  if (resourceShown === chunkKey) {
+    placeTooltip(clientX, clientY);
+    return;
+  }
+  if (resourceRequest && resourceRequest.chunk === chunkKey) return;
+  if (resourceRequest) clearTimeout(resourceRequest.timer);
+
+  const timer = setTimeout(async () => {
+    try {
+      const query = new URLSearchParams({ surface: SURFACE, x: hit.tile.x, y: hit.tile.y });
+      const payload = await (await fetch("/resource?" + query)).json();
+      if (!payload.found) { hideTooltip(); return; }
+
+      const amount = payload.percent !== null && payload.percent !== undefined
+        ? `${Math.round(payload.percent)}% yield`
+        : formatAmount(payload.total);
+      const label = payload.name.replace(/-/g, " ");
+      const tooltip = document.getElementById("tooltip");
+      tooltip.innerHTML =
+        `<div><span class="amount">${amount}</span> ${label}</div>` +
+        `<div class="sub">${payload.entities} tiles over ${payload.chunks} chunk${payload.chunks === 1 ? "" : "s"}` +
+        `${payload.truncated ? " (partial)" : ""}</div>`;
+      tooltip.hidden = false;
+      resourceShown = chunkKey;
+      placeTooltip(clientX, clientY);
+    } catch (error) {
+      hideTooltip();
+    }
+  }, 120);
+
+  resourceRequest = { chunk: chunkKey, timer };
+}
+
+function updateCursorReadout(world) {
+  document.getElementById("cursor").textContent =
+    `${Math.round(world.x)}, ${Math.round(world.y)}` + (hoverName ? ` · ${hoverName}` : "");
+}
+
+canvas.addEventListener("pointermove", (event) => {
+  const world = screenToWorld(event.clientX, event.clientY);
+
+  if (dragging) {
+    follow = null;
+    view.x = dragStart.viewX - (event.clientX - dragStart.x) / view.scale;
+    view.y = dragStart.viewY - (event.clientY - dragStart.y) / view.scale;
+    if (highlight) { highlight = null; setActiveLegendRow(null); }
+    hoverName = null;
+    hideTooltip();
+    updateCursorReadout(world);
+    requestDraw();
+    return;
+  }
+
+  const hit = pickAt(event.clientX, event.clientY);
+  const nextRow = hit ? hit.row : null;
+  hoverName = hit ? hit.name : null;
+  updateCursorReadout(world);
+
+  if (hit && hit.row.resource && hit.tile) {
+    requestResource(hit, event.clientX, event.clientY);
+  } else {
+    hideTooltip();
+  }
+
+  if (nextRow !== highlight) {
+    highlight = nextRow;
+    setActiveLegendRow(nextRow);
+    requestDraw();
+  }
+});
+
+canvas.addEventListener("pointerleave", () => {
+  if (highlight) { highlight = null; setActiveLegendRow(null); requestDraw(); }
+  hoverName = null;
+  hideTooltip();
+});
+
+function endDrag(event) {
+  dragging = false;
+  canvas.classList.remove("dragging");
+  if (event && event.pointerId !== undefined && canvas.hasPointerCapture(event.pointerId)) {
+    canvas.releasePointerCapture(event.pointerId);
+  }
+  renderPanel();
+}
+
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+
+canvas.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  const before = screenToWorld(event.clientX, event.clientY);
+  view.scale = Math.min(24, Math.max(0.05, view.scale * Math.exp(-event.deltaY * 0.0015)));
+  const after = screenToWorld(event.clientX, event.clientY);
+  view.x += before.x - after.x;
+  view.y += before.y - after.y;
+  requestDraw();
+}, { passive: false });
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { follow = null; renderPanel(); }
+});
+
+window.addEventListener("resize", resize);
+
+// Biters are asked for per viewport, so the game never scans more than the
+// browser is actually showing.
+async function pollUnits() {
+  if (!layers.biters) {
+    if (units.length) { units = []; requestDraw(); }
+    return;
+  }
+  const topLeft = screenToWorld(0, 0);
+  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
+  const query = new URLSearchParams({
+    surface: SURFACE,
+    x1: Math.floor(topLeft.x) - 16,
+    y1: Math.floor(topLeft.y) - 16,
+    x2: Math.ceil(bottomRight.x) + 16,
+    y2: Math.ceil(bottomRight.y) + 16,
+  });
+  try {
+    const payload = await (await fetch("/units?" + query)).json();
+    units = payload.units || [];
+    unitsTruncated = Boolean(payload.truncated);
+    const count = units.length / 2;
+    document.getElementById("biter-count").textContent = count + (unitsTruncated ? "+" : "");
+    requestDraw();
+  } catch (error) {
+    /* next tick tries again */
+  }
+}
+
+setInterval(pollUnits, 500);
+
+const LEGEND = [
+  {
+    title: "Terrain",
+    rows: [
+      { label: "water", match: (key) => key === "t:water" || key === "t:deepwater", fallback: "#1b4a63", highlight: "color" },
+      { label: "trees", match: (key) => key.startsWith("e:tree-"), fallback: "#306330", highlight: "color" },
+      { label: "cliffs", match: (key) => key.startsWith("e:cliff"), fallback: "#6b6255", highlight: "color" },
+      { label: "rocks", match: (key) => key.includes("-rock"), fallback: "#816950", highlight: "color" },
+    ],
+  },
+  {
+    title: "Resources",
+    rows: [
+      { resource: true, label: "iron ore", match: (key) => key === "e:iron-ore", fallback: "#688fa8", highlight: "color" },
+      { resource: true, label: "copper ore", match: (key) => key === "e:copper-ore", fallback: "#c07040", highlight: "color" },
+      { resource: true, label: "coal", match: (key) => key === "e:coal", fallback: "#111111", highlight: "color" },
+      { resource: true, label: "stone", match: (key) => key === "e:stone", fallback: "#b5a374", highlight: "color" },
+      { resource: true, label: "uranium ore", match: (key) => key === "e:uranium-ore", fallback: "#1fd11f", highlight: "color" },
+      { resource: true, label: "crude oil", match: (key) => key === "e:crude-oil", fallback: "#1f4fd1", highlight: "color" },
+    ],
+  },
+  {
+    title: "Enemies",
+    rows: [
+      { label: "nests and worms", match: (key) => key.startsWith("x:"), fallback: "#ff1919", shape: "square", highlight: "color" },
+      { label: "biter (radar only)", fixed: "#ff1919", shape: "round", highlight: "units" },
+    ],
+  },
+  {
+    title: "Overlay",
+    rows: [
+      { label: "map tag", fixed: "#ffd479", shape: "round", highlight: "tags" },
+      { label: "recent loss", fixed: "#ff4d4d", shape: "round", highlight: "alerts" },
+      { label: "player", fixed: "#ff9d2e", shape: "round", highlight: "players" },
+      { label: "train on the path", fixed: TRAIN_STATE_COLORS.on_the_path, highlight: "trains", states: ["on_the_path"] },
+      { label: "train waiting", fixed: TRAIN_STATE_COLORS.wait_signal, highlight: "trains", states: ["wait_signal", "arrive_signal"] },
+      { label: "train at station", fixed: TRAIN_STATE_COLORS.wait_station, highlight: "trains", states: ["wait_station", "arrive_station"] },
+      { label: "train no path", fixed: TRAIN_STATE_COLORS.no_path, highlight: "trains", states: ["no_path", "destination_full"] },
+    ],
+  },
+];
+
+function colorFor(row) {
+  if (row.fixed) return row.fixed;
+  for (const [key, color] of Object.entries(palette)) {
+    if (row.match && row.match(key)) return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+  }
+  return row.fallback;
+}
+
+function renderLegend() {
+  const container = document.getElementById("legend");
+  container.innerHTML = "";
+  legendRows = [];
+  for (const group of LEGEND) {
+    const block = document.createElement("div");
+    block.className = "legend-group";
+    const title = document.createElement("div");
+    title.className = "legend-title";
+    title.textContent = group.title;
+    block.appendChild(title);
+    for (const row of group.rows) {
+      const line = document.createElement("div");
+      line.className = "legend-row";
+      const chip = document.createElement("span");
+      chip.className = "chip" + (row.shape === "round" ? " round" : "");
+      chip.style.background = colorFor(row);
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = row.label;
+      line.append(chip, label);
+
+      // A row can only light something up if its layer is actually drawn.
+      const layerFor = { color: "terrain", units: "biters", players: "players", trains: "trains",
+                         tags: "tags", alerts: "alerts" };
+      const live = row.highlight && layers[layerFor[row.highlight]];
+      if (!live) line.classList.add("dead");
+      line.title = live ? "hover to highlight on the map" : "enable the layer to highlight this";
+
+      if (live) {
+        line.addEventListener("pointerenter", () => {
+          highlight = row;
+          setActiveLegendRow(row);
+          requestDraw();
+        });
+        line.addEventListener("pointerleave", () => {
+          highlight = null;
+          setActiveLegendRow(null);
+          requestDraw();
+        });
+      }
+      legendRows.push({ row, element: line });
+      block.appendChild(line);
+    }
+    container.appendChild(block);
+  }
+}
+
+async function loadPalette() {
+  try {
+    const payload = await (await fetch("/palette")).json();
+    palette = payload.keys || {};
+  } catch (error) {
+    palette = {};
+  }
+  buildColorRowIndex();
+  renderLegend();
+}
+
+for (const name of Object.keys(layers)) {
+  const input = document.getElementById("layer-" + name);
+  input.addEventListener("change", () => {
+    layers[name] = input.checked;
+    if (name === "biters" && input.checked) pollUnits();
+    if (highlight && !layers[{ color: "terrain", units: "biters", players: "players", trains: "trains",
+                               tags: "tags", alerts: "alerts" }[highlight.highlight]]) {
+      highlight = null;
+    }
+    renderLegend();
+    requestDraw();
+  });
+}
+
+const events = new EventSource("/events");
+events.addEventListener("state", (event) => {
+  state = JSON.parse(event.data);
+  followTarget();
+  renderPanel();
+  requestDraw();
+});
+events.addEventListener("tiles", (event) => {
+  for (const chunk of JSON.parse(event.data).chunks || []) {
+    if (chunk.surface !== SURFACE) continue;
+    charted.set(key(chunk.x, chunk.y), chunk.revision);
+    for (let zoom = 0; zoom <= MAX_ZOOM; zoom++) {
+      tiles.delete(`${zoom}:${chunk.x >> zoom},${chunk.y >> zoom}`);
+    }
+    tileGeneration++;
+  }
+  rebuildZoomIndex();
+  document.getElementById("chunk-count").textContent = charted.size;
+  requestDraw();
+});
+events.addEventListener("index", () => { loadIndex(); loadPalette(); });
+events.addEventListener("tags", (event) => {
+  tags = JSON.parse(event.data).tags || [];
+  document.getElementById("tag-count").textContent = tags.length;
+  requestDraw();
+});
+events.addEventListener("pollution", () => { loadPollution(); });
+events.addEventListener("alerts", (event) => {
+  alerts = JSON.parse(event.data).alerts || [];
+  renderAlerts();
+  requestDraw();
+});
+events.onerror = () => {
+  document.getElementById("status-dot").className = "dot down";
+  document.getElementById("status-text").textContent = "bridge unreachable";
+};
+
+async function loadTags() {
+  try {
+    const payload = await (await fetch(`/tags?surface=${SURFACE}`)).json();
+    tags = payload.tags || [];
+    document.getElementById("tag-count").textContent = tags.length;
+    requestDraw();
+  } catch (error) {
+    /* the poller will publish it again */
+  }
+}
+
+async function loadPollution() {
+  try {
+    const payload = await (await fetch(`/pollution?surface=${SURFACE}`)).json();
+    pollution = { peak: payload.peak || 0, chunks: payload.chunks || [] };
+    document.getElementById("pollution-peak").textContent = pollution.peak;
+    requestDraw();
+  } catch (error) {
+    /* same */
+  }
+}
+
+async function loadAlerts() {
+  try {
+    const payload = await (await fetch("/alerts")).json();
+    alerts = payload.alerts || [];
+    renderAlerts();
+    requestDraw();
+  } catch (error) {
+    /* same */
+  }
+}
+
+loadIndex();
+loadPalette();
+loadTags();
+loadPollution();
+loadAlerts();
+pollUnits();
+resize();
+renderPanel();
+</script>
+</body>
+</html>
