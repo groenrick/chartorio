@@ -204,7 +204,7 @@ All settings are environment variables on the bridge service.
 | path | returns |
 | --- | --- |
 | `/` | the map page |
-| `/ws` | the WebSocket. The browser sends `{type: "viewport", ...}`; the server pushes `state`, `chunks`, `tiles`, `units`, `signals`, `tags`, `pollution` and `alerts` |
+| `/ws` | the WebSocket. The browser sends `{type: "viewport", ...}`; the server pushes `state`, `chunks`, `tiles`, `units`, `signals`, `tags`, `pollution`, `alerts` and `viewers` |
 | `/events` | the same channels as `/ws` over server-sent events, used when a WebSocket cannot be established. Viewport comes from the query string and is updated through `/viewport` |
 | `/status` | what the game is being asked to do: calls, rate, and game thread share |
 | `/state` | players, trains, tick |
