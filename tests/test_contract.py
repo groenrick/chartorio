@@ -38,6 +38,31 @@ class Contract(unittest.TestCase):
                          "the bridge calls commands the scenario does not register, so "
                          "those layers are dead: %s" % ", ".join(sorted(missing)))
 
+    def test_no_entity_search_is_left_unbounded(self):
+        """An entity search costs time proportional to the area searched, not to
+        what it finds. A search without an `area` walks the whole surface, which
+        is the thing this project keeps having to take back out."""
+        scenario = read("scenario", "control.lua")
+        unbounded = []
+        for match in re.finditer(r"find_entities_filtered\(\{", scenario):
+            # The argument table ends at the matching brace; a search never
+            # nests one, so the first close is the right one.
+            tail = scenario[match.end():scenario.index("}", match.end())]
+            if "area" not in tail:
+                line = scenario.count("\n", 0, match.start()) + 1
+                unbounded.append(line)
+        self.assertEqual(unbounded, [],
+                         "find_entities_filtered without an area at line(s) %s"
+                         % ", ".join(str(line) for line in unbounded))
+
+    def test_the_signal_hook_is_actually_assigned(self):
+        """`local remember_signal_hook` followed by a `local function` of the
+        same name makes a second local and leaves the hook nil forever, which
+        is how the signal registry silently stopped updating once before."""
+        scenario = read("scenario", "control.lua")
+        self.assertIn("remember_signal_hook = function", scenario,
+                      "the forward declaration is never assigned")
+
     def test_the_regexes_still_find_something(self):
         # A test that silently matches nothing would pass forever.
         self.assertIn("chartorio", commands_the_scenario_registers())
