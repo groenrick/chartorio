@@ -145,6 +145,9 @@ def layer_info(node):
         "frames": node.get("frame_count", 1),
         "line_length": node.get("line_length", 0),
         "directions": node.get("direction_count", 1),
+        # Ore sheets are richness across by random variation down, so the page
+        # needs to know how many rows there are to clamp into.
+        "variation_count": node.get("variation_count", 1),
     }
 
 
