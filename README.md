@@ -23,7 +23,9 @@ the ragged edge where the charted area stops.*
   like the game does; oil reports a yield percentage instead of a count
 - **Nests and worms** in enemy red, and **live biters** that appear only where
   radar or a player gives current vision
-- **Players and trains** live, with train colour by state and click-to-follow
+- **Players and trains** live, with train colour by state and click-to-follow.
+  Positions arrive four times a second and the page interpolates between them,
+  so movement is smooth without polling the game harder
 - **Pollution** as a heat overlay, one value per chunk
 - **Map tags** you placed in game, with their text
 - **Alerts** — anything the player force loses, as a fading marker plus a feed
@@ -127,9 +129,9 @@ All settings are environment variables on the bridge service.
 | `RCON_HOST` / `RCON_PORT` | `127.0.0.1` / `27015` | where Factorio listens |
 | `CHARTORIO_PORT` | `8080` | web port |
 | `CHARTORIO_WEB` | auto | directory holding `index.html` |
-| `CHARTORIO_STATE_INTERVAL` | `0.5` | seconds between player/train polls |
+| `CHARTORIO_STATE_INTERVAL` | `0.25` | seconds between player/train polls |
 | `CHARTORIO_DIRTY_INTERVAL` | `2` | seconds between change and alert polls |
-| `CHARTORIO_INDEX_INTERVAL` | `15` | seconds between chunk, tag and pollution polls |
+| `CHARTORIO_INDEX_INTERVAL` | `10` | seconds between map tag polls |
 | `CHARTORIO_MAX_ZOOM` | `3` | zoomed-out levels to build |
 | `CHARTORIO_TILE_CACHE` | `3000` | tiles kept in memory, per cache |
 | `CHARTORIO_FOG` | `strict` | `open` renders uncharted chunks too |

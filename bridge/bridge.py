@@ -23,9 +23,9 @@ RCON_PORT = int(os.environ.get("RCON_PORT", "27015"))
 RCON_PASSWORD = os.environ["RCON_PASSWORD"]
 LISTEN_HOST = os.environ.get("CHARTORIO_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("CHARTORIO_PORT", "8080"))
-STATE_INTERVAL = float(os.environ.get("CHARTORIO_STATE_INTERVAL", "0.5"))
+STATE_INTERVAL = float(os.environ.get("CHARTORIO_STATE_INTERVAL", "0.25"))
 DIRTY_INTERVAL = float(os.environ.get("CHARTORIO_DIRTY_INTERVAL", "2"))
-INDEX_INTERVAL = float(os.environ.get("CHARTORIO_INDEX_INTERVAL", "15"))
+INDEX_INTERVAL = float(os.environ.get("CHARTORIO_INDEX_INTERVAL", "10"))
 TILE_CACHE_SIZE = int(os.environ.get("CHARTORIO_TILE_CACHE", "3000"))
 MAX_ZOOM = int(os.environ.get("CHARTORIO_MAX_ZOOM", "3"))
 TILE_PX = 64
@@ -293,7 +293,7 @@ WORLD = World()
 class UnitCache:
     """Biters move constantly; one lookup per interval is shared by all viewers."""
 
-    def __init__(self, ttl=0.25):
+    def __init__(self, ttl=0.15):
         self.ttl = ttl
         self.lock = threading.Lock()
         self.entries = {}
@@ -517,6 +517,7 @@ def state_poller():
                 if not isinstance(payload.get(key), list):
                     payload[key] = []
             payload["connected"] = True
+            payload["interval"] = STATE_INTERVAL
             WORLD.set_state(payload)
             EVENTS.publish("state", payload)
             failures = 0

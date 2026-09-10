@@ -231,11 +231,18 @@ const context = canvas.getContext("2d");
 
 const view = { x: 0, y: 0, scale: 2 };
 let state = { connected: false, players: [], trains: [] };
+let previousState = null;       // the update before the current one
+let stateArrivedAt = 0;         // when the current update landed
+let stateInterval = 250;        // how far apart updates arrive, in ms
+let animating = false;
 let charted = new Map();        // "x,y" -> revision
 let tiles = new Map();          // "x,y" -> { image, revision, ready }
 let follow = null;
 let pendingFrame = false;
 let units = [];                 // flat [x, y, x, y, ...] of visible biters
+let unitPairs = [];             // [fromX, fromY, toX, toY, ...] for smooth motion
+let unitsArrivedAt = 0;
+let unitInterval = 300;
 let unitsTruncated = false;
 let palette = {};               // "e:iron-ore" -> [r, g, b]
 
@@ -454,7 +461,8 @@ function toCss(color) {
 }
 
 function drawTrains() {
-  for (const train of state.trains) {
+  for (const raw of state.trains) {
+    const train = interpolated(raw, previousTrain(raw.id));
     const screen = worldToScreen(train.x, train.y);
     const color = TRAIN_STATE_COLORS[train.state] || "#8a7d6d";
     const length = Math.max(6, 6 * view.scale);
@@ -480,7 +488,8 @@ function drawTrains() {
 }
 
 function drawPlayers() {
-  for (const player of state.players) {
+  for (const raw of state.players) {
+    const player = interpolated(raw, previousPlayer(raw.name));
     const screen = worldToScreen(player.x, player.y);
     const radius = Math.max(4, Math.min(9, 2 * view.scale));
 
@@ -507,13 +516,70 @@ function drawPlayers() {
   }
 }
 
+// Biters arrive as bare coordinates with no identity, so pair each new
+// position with the nearest previous one through a coarse spatial hash. Close
+// enough to be the same biter means it can slide; anything further just pops.
+const UNIT_MATCH_RADIUS = 6;
+
+function pairUnits(previous, next) {
+  const pairs = new Array(next.length * 2);
+  const cell = UNIT_MATCH_RADIUS;
+  const buckets = new Map();
+  for (let index = 0; index < previous.length; index += 2) {
+    const bucketKey = `${Math.floor(previous[index] / cell)},${Math.floor(previous[index + 1] / cell)}`;
+    if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
+    buckets.get(bucketKey).push(index);
+  }
+
+  const taken = new Set();
+  for (let index = 0; index < next.length; index += 2) {
+    const x = next[index];
+    const y = next[index + 1];
+    let bestIndex = -1;
+    let bestDistance = UNIT_MATCH_RADIUS * UNIT_MATCH_RADIUS;
+    const cellX = Math.floor(x / cell);
+    const cellY = Math.floor(y / cell);
+    for (let offsetY = -1; offsetY <= 1; offsetY++) {
+      for (let offsetX = -1; offsetX <= 1; offsetX++) {
+        const candidates = buckets.get(`${cellX + offsetX},${cellY + offsetY}`);
+        if (!candidates) continue;
+        for (const candidate of candidates) {
+          if (taken.has(candidate)) continue;
+          const dx = previous[candidate] - x;
+          const dy = previous[candidate + 1] - y;
+          const distance = dx * dx + dy * dy;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = candidate;
+          }
+        }
+      }
+    }
+    const target = index * 2;
+    if (bestIndex >= 0) {
+      taken.add(bestIndex);
+      pairs[target] = previous[bestIndex];
+      pairs[target + 1] = previous[bestIndex + 1];
+    } else {
+      pairs[target] = x;
+      pairs[target + 1] = y;
+    }
+    pairs[target + 2] = x;
+    pairs[target + 3] = y;
+  }
+  return pairs;
+}
+
 function drawUnits() {
   const radius = Math.max(1.5, Math.min(5, 0.9 * view.scale));
+  const factor = Math.max(0, Math.min(1, (performance.now() - unitsArrivedAt) / unitInterval));
   context.fillStyle = "#ff1919";
   context.strokeStyle = "rgba(0, 0, 0, 0.55)";
   context.lineWidth = 1;
-  for (let index = 0; index < units.length; index += 2) {
-    const screen = worldToScreen(units[index], units[index + 1]);
+  for (let index = 0; index < unitPairs.length; index += 4) {
+    const x = unitPairs[index] + (unitPairs[index + 2] - unitPairs[index]) * factor;
+    const y = unitPairs[index + 1] + (unitPairs[index + 3] - unitPairs[index + 1]) * factor;
+    const screen = worldToScreen(x, y);
     context.beginPath();
     context.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
     context.fill();
@@ -578,6 +644,62 @@ function packedHighlightColors(row) {
     add(parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16));
   }
   return packed;
+}
+
+// Positions arrive a few times a second; drawing them straight would step.
+// Interpolating between the last two updates makes movement continuous without
+// asking the game any more often.
+function interpolationFactor() {
+  if (!previousState) return 1;
+  const elapsed = performance.now() - stateArrivedAt;
+  return Math.max(0, Math.min(1, elapsed / stateInterval));
+}
+
+function interpolated(entity, previous) {
+  if (!previous) return entity;
+  const factor = interpolationFactor();
+  // A jump this large is a teleport or a respawn, not movement: do not slide.
+  if (Math.abs(entity.x - previous.x) > 64 || Math.abs(entity.y - previous.y) > 64) return entity;
+  return {
+    ...entity,
+    x: previous.x + (entity.x - previous.x) * factor,
+    y: previous.y + (entity.y - previous.y) * factor,
+  };
+}
+
+function previousPlayer(name) {
+  return previousState && previousState.players.find((player) => player.name === name);
+}
+
+function previousTrain(id) {
+  return previousState && previousState.trains.find((train) => train.id === id);
+}
+
+function movingEntities() {
+  if (unitPairs.length && (performance.now() - unitsArrivedAt) < unitInterval) return true;
+  if (!previousState) return false;
+  for (const player of state.players) {
+    const before = previousPlayer(player.name);
+    if (before && (before.x !== player.x || before.y !== player.y)) return true;
+  }
+  for (const train of state.trains) {
+    const before = previousTrain(train.id);
+    if (before && (before.x !== train.x || before.y !== train.y)) return true;
+  }
+  return false;
+}
+
+// Only run a continuous loop while something actually moves, so an idle map
+// costs nothing.
+function animate() {
+  if (!movingEntities() || interpolationFactor() >= 1) {
+    animating = false;
+    draw();
+    return;
+  }
+  animating = true;
+  draw();
+  requestAnimationFrame(animate);
 }
 
 // Reading the canvas would return whatever the spotlight already did to it,
@@ -788,6 +910,7 @@ function drawAlerts() {
 
 function draw() {
   updateCenterPoint();
+  followTarget();
   context.fillStyle = "#0f0c09";
   context.fillRect(0, 0, window.innerWidth, window.innerHeight);
   if (layers.terrain) drawTiles();
@@ -808,8 +931,8 @@ function draw() {
   if (layers.players) drawPlayers();
 
   if (spotlight === "units" && layers.biters) {
-    for (let index = 0; index < units.length; index += 2) {
-      const screen = worldToScreen(units[index], units[index + 1]);
+    for (let index = 0; index < unitPairs.length; index += 4) {
+      const screen = worldToScreen(unitPairs[index + 2], unitPairs[index + 3]);
       markerRing(screen.x, screen.y, Math.max(6, 1.6 * view.scale), "#ff5252");
     }
   }
@@ -844,13 +967,15 @@ function draw() {
 
 function followTarget() {
   if (!follow) return;
-  const source = follow.kind === "player"
+  const target = follow.kind === "player"
     ? state.players.find((player) => player.name === follow.id)
     : state.trains.find((train) => String(train.id) === String(follow.id));
-  if (source) {
-    view.x = source.x;
-    view.y = source.y;
-  }
+  if (!target) return;
+  const smooth = follow.kind === "player"
+    ? interpolated(target, previousPlayer(target.name))
+    : interpolated(target, previousTrain(target.id));
+  view.x = smooth.x;
+  view.y = smooth.y;
 }
 
 function renderAlerts() {
@@ -1116,7 +1241,7 @@ window.addEventListener("resize", resize);
 // browser is actually showing.
 async function pollUnits() {
   if (!layers.biters) {
-    if (units.length) { units = []; requestDraw(); }
+    if (units.length) { units = []; unitPairs = []; requestDraw(); }
     return;
   }
   const topLeft = screenToWorld(0, 0);
@@ -1130,17 +1255,22 @@ async function pollUnits() {
   });
   try {
     const payload = await (await fetch("/units?" + query)).json();
-    units = payload.units || [];
+    const next = payload.units || [];
+    unitPairs = pairUnits(units, next);
+    units = next;
+    unitsArrivedAt = performance.now();
     unitsTruncated = Boolean(payload.truncated);
     const count = units.length / 2;
     document.getElementById("biter-count").textContent = count + (unitsTruncated ? "+" : "");
-    requestDraw();
+    if (!animating) animate(); else requestDraw();
   } catch (error) {
     /* next tick tries again */
   }
 }
 
-setInterval(pollUnits, 500);
+const UNIT_POLL_MS = 300;
+unitInterval = UNIT_POLL_MS;
+setInterval(pollUnits, UNIT_POLL_MS);
 
 const LEGEND = [
   {
@@ -1268,10 +1398,14 @@ for (const name of Object.keys(layers)) {
 
 const events = new EventSource("/events");
 events.addEventListener("state", (event) => {
-  state = JSON.parse(event.data);
+  const next = JSON.parse(event.data);
+  previousState = state.players || state.trains ? state : null;
+  stateInterval = Math.max(80, (next.interval || 0.25) * 1000);
+  stateArrivedAt = performance.now();
+  state = next;
   followTarget();
   renderPanel();
-  requestDraw();
+  if (!animating) animate(); else requestDraw();
 });
 events.addEventListener("tiles", (event) => {
   for (const chunk of JSON.parse(event.data).chunks || []) {

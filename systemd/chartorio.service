@@ -10,6 +10,7 @@ Group=chartorio
 # Holds RCON_PASSWORD=... and is readable by the chartorio group only.
 EnvironmentFile=/etc/chartorio/rcon.env
 Environment=CHARTORIO_PORT=8080
+Environment=CHARTORIO_STATE_INTERVAL=0.25
 Environment=CHARTORIO_WEB=/opt/chartorio/web
 ExecStart=/usr/bin/python3 /opt/chartorio/bridge/bridge.py
 Restart=always
