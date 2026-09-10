@@ -429,6 +429,9 @@ function drawTiles() {
 
   for (let tileY = fromY; tileY <= toY; tileY++) {
     for (let tileX = fromX; tileX <= toX; tileX++) {
+      // At sprite zoom one tile is one chunk, so this is the chunk the sprite
+      // layer would have drawn.
+      if (zoom === 0 && terrainCovers(tileX, tileY)) continue;
       const entry = tileEntry(zoom, tileX, tileY);
       if (!entry) continue;
       if (entry.ready) {
@@ -1253,6 +1256,14 @@ function expandRuns(runs, length) {
   return indices;
 }
 
+// Whether the sprite layer has this chunk's ground covered, so the colour tile
+// underneath can be skipped rather than showing around every sprite.
+function terrainCovers(chunkX, chunkY) {
+  if (!spritesWanted()) return false;
+  const entry = terrainCache.get(terrainKey(chunkX, chunkY));
+  return Boolean(entry) && entry.revision === chartedRevision(chunkX, chunkY);
+}
+
 function terrainKey(chunkX, chunkY) {
   return chunkX + "," + chunkY;
 }
@@ -1261,6 +1272,22 @@ function buildTerrainChunk(chunkX, chunkY, payload) {
   const size = payload.size;                  // raster cells per chunk edge
   const step = size / CHUNK_TILES;            // cells per world tile
   const indices = expandRuns(payload.runs || [], size * size);
+
+  // The raster bakes entities over the ground, so where a building stands the
+  // index is the entity and not the tile beneath it. Left as a hole, the colour
+  // map shows through as a coloured square around every sprite. The ground
+  // under a building is almost always what surrounds it, so the chunk's
+  // commonest tile fills those positions.
+  const tally = new Map();
+  for (let n = 0; n < indices.length; n++) {
+    const name = payload.names[indices[n]];
+    if (name) tally.set(name, (tally.get(name) || 0) + 1);
+  }
+  let common = null;
+  let best = 0;
+  for (const [name, count] of tally) {
+    if (count > best) { best = count; common = name; }
+  }
 
   const canvas = document.createElement("canvas");
   canvas.width = CHUNK_TILES * TERRAIN_CACHE_PX;
@@ -1271,7 +1298,7 @@ function buildTerrainChunk(chunkX, chunkY, payload) {
     for (let tx = 0; tx < CHUNK_TILES; tx++) {
       // Sample the middle of the tile: the raster is finer than one cell a tile.
       const cell = Math.floor(ty * step) * size + Math.floor(tx * step);
-      const name = payload.names[indices[cell]];
+      const name = payload.names[indices[cell]] || common;
       if (!name) continue;
       const meta = tileIndex[name.slice(2)];   // drop the "t:" prefix
       if (!meta) continue;

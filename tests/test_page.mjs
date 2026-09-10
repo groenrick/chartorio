@@ -115,7 +115,9 @@ function boot() {
   // handed out by an epilogue running in the same scope.
   const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES, layers,"
               + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers, spriteCell, spriteKey,"
-              + " expandRuns, tileVariant, terrainKey,"
+              + " expandRuns, tileVariant, terrainKey, terrainCovers,"
+              + " __setTerrain(x, y, rev) { terrainCache.set(terrainKey(x, y), { revision: rev, canvas: {} }); },"
+              + " __setCharted(x, y, rev) { charted.set(key(x, y), rev); },"
               + " __setSpritesAvailable(v) { spritesAvailable = v; },"
               + " get transport() { return transport; } };";
   vm.runInContext(extractScript(html) + probe, context, { filename: "index.html" });
@@ -407,6 +409,40 @@ test("neighbouring tiles do not all land on the same variant", () => {
     for (let x = 0; x < 8; x++) seen.add(page.tileVariant(x, y, 16));
   }
   assert.ok(seen.size >= 6, `only ${seen.size} variants across 64 tiles`);
+});
+
+test("a chunk the sprites cover needs no colour tile under it", () => {
+  // The colour map bakes entities over the ground, so leaving it underneath is
+  // what put a blue square around every sprite.
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.layers.terrain = true;
+  page.view.scale = 24;
+  page.__setCharted(3, 4, 7);
+  assert.equal(page.terrainCovers(3, 4), false, "nothing cached yet");
+  page.__setTerrain(3, 4, 7);
+  assert.equal(page.terrainCovers(3, 4), true, "cached at the current revision");
+});
+
+test("a stale terrain chunk does not suppress its colour tile", () => {
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.layers.terrain = true;
+  page.view.scale = 24;
+  page.__setCharted(3, 4, 8);
+  page.__setTerrain(3, 4, 7);          // cached before the chunk changed
+  assert.equal(page.terrainCovers(3, 4), false,
+               "a changed chunk must fall back to the colour tile, not go blank");
+});
+
+test("below the sprite threshold the colour tile always stands", () => {
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.layers.terrain = true;
+  page.__setCharted(3, 4, 7);
+  page.__setTerrain(3, 4, 7);
+  page.view.scale = 4;
+  assert.equal(page.terrainCovers(3, 4), false);
 });
 
 test("ore totals read the way the game writes them", () => {
