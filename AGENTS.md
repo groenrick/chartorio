@@ -107,6 +107,36 @@ polling cost nothing and two entity searches cost half the game thread.
   ground, counting requests that a callback had already refilled, and asserting
   on totals instead of deltas.
 
+## Commits
+
+Conventional Commits, `type(scope): subject`.
+
+Types: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`, `build`, `chore`.
+Scopes are the parts of the project: `scenario`, `bridge`, `web`, `tools`,
+`install`, `docs`.
+
+Subject in the imperative, no trailing full stop, under about 60 characters.
+Use the body for **why**, since this project's interesting changes are usually
+a fix for something non-obvious, and say what was measured when a change was
+made for performance. Breaking changes get a `!` after the scope and a
+`BREAKING CHANGE:` footer.
+
+```
+perf(scenario): keep rail signals in a per chunk registry
+
+A viewport search for signals cost 328ms a call, half the game thread with
+one browser open. Signals never move, so only their state is read now: 15ms.
+```
+
+```
+fix(bridge): percent decode query values
+fix(scenario): report physical_position for players
+feat(web): pan with wasd and the arrow keys
+docs(readme): show how rails are drawn
+```
+
+History before this convention was adopted is plain prose; leave it be.
+
 ## Conventions
 
 - Comments explain why, not what, and are worth writing where the reason is not
