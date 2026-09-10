@@ -177,6 +177,7 @@
       <label class="toggle"><input type="checkbox" id="layer-trains" checked> trains</label>
       <label class="toggle"><input type="checkbox" id="layer-players" checked> players</label>
       <label class="toggle"><input type="checkbox" id="layer-tags" checked> map tags <span class="meta" id="tag-count">0</span></label>
+      <label class="toggle"><input type="checkbox" id="layer-signals" checked> rail signals <span class="meta" id="signal-count">0</span></label>
       <label class="toggle"><input type="checkbox" id="layer-alerts" checked> alerts</label>
       <label class="toggle"><input type="checkbox" id="layer-pollution"> pollution</label>
       <div class="note">Nests sit in the terrain layer, so they stay visible once charted. Moving biters need current radar or player vision, exactly like the in-game map.</div>
@@ -212,6 +213,19 @@ const SURFACE = "nauvis";
 const SPOTLIGHT_DIM = 0.68;
 const SPOTLIGHT_LIFT = 0.45;
 const OVERLAY_DIM_ALPHA = 0.3;
+
+// The colours the game puts on the signal lamp itself.
+const SIGNAL_STATE_COLORS = {
+  open: "#7bc96f",
+  closed: "#e05c5c",
+  reserved: "#d9c04a",
+  reserved_by_circuit_network: "#5fa8e0",
+  all_open: "#7bc96f",
+  partially_open: "#d9c04a",
+  none_open: "#e05c5c",
+  none: "#8a7d6d",
+  unknown: "#8a7d6d",
+};
 
 const TRAIN_STATE_COLORS = {
   on_the_path: "#7bc96f",
@@ -249,8 +263,10 @@ let palette = {};               // "e:iron-ore" -> [r, g, b]
 const MAX_ZOOM = 3;
 const layers = {
   terrain: true, biters: true, trains: true, players: true,
-  pollution: false, tags: true, alerts: true,
+  pollution: false, tags: true, alerts: true, signals: true,
 };
+let signals = [];
+const SIGNAL_MIN_SCALE = 0.9;   // below this they are pinpricks and just clutter
 let zoomIndex = [];             // per zoom level: tile key -> summed revision
 let tags = [];
 let pollution = { peak: 0, chunks: [] };
@@ -813,6 +829,17 @@ function pickAt(clientX, clientY) {
       }
     }
   }
+  if (layers.signals && view.scale >= SIGNAL_MIN_SCALE) {
+    for (const signal of signals) {
+      const screen = worldToScreen(signal.x, signal.y);
+      if (Math.hypot(screen.x - clientX, screen.y - clientY) <= 10) {
+        return {
+          row: legendRowByLabel("clear"),
+          name: `${signal.chain ? "chain signal" : "signal"} · ${signal.state.replace(/_/g, " ")}`,
+        };
+      }
+    }
+  }
   if (layers.terrain) {
     const packed = sampleWorldColor(world.x, world.y);
     if (packed !== null) {
@@ -854,6 +881,35 @@ function drawPollution() {
     const green = Math.round(210 - 180 * share);
     context.fillStyle = `rgba(${red}, ${green}, 40, ${0.12 + 0.33 * share})`;
     context.fillRect(origin.x, origin.y, Math.ceil(size) + 1, Math.ceil(size) + 1);
+  }
+}
+
+// A round lamp for a plain signal and a diamond for a chain signal, matching
+// how the two read apart in game, filled with the state's own colour.
+function drawSignals() {
+  if (view.scale < SIGNAL_MIN_SCALE) return;
+  const radius = Math.max(2.5, Math.min(7, 1.1 * view.scale));
+  for (const signal of signals) {
+    const screen = worldToScreen(signal.x, signal.y);
+    if (screen.x < -20 || screen.y < -20 ||
+        screen.x > window.innerWidth + 20 || screen.y > window.innerHeight + 20) continue;
+    const color = SIGNAL_STATE_COLORS[signal.state] || SIGNAL_STATE_COLORS.unknown;
+
+    context.beginPath();
+    if (signal.chain) {
+      context.moveTo(screen.x, screen.y - radius);
+      context.lineTo(screen.x + radius, screen.y);
+      context.lineTo(screen.x, screen.y + radius);
+      context.lineTo(screen.x - radius, screen.y);
+      context.closePath();
+    } else {
+      context.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+    }
+    context.fillStyle = color;
+    context.fill();
+    context.lineWidth = 1;
+    context.strokeStyle = "rgba(0, 0, 0, 0.7)";
+    context.stroke();
   }
 }
 
@@ -926,6 +982,7 @@ function draw() {
   drawGrid();
   if (layers.biters) drawUnits();
   if (layers.alerts) drawAlerts();
+  if (layers.signals) drawSignals();
   if (layers.trains) drawTrains();
   if (layers.tags) drawTags();
   if (layers.players) drawPlayers();
@@ -940,6 +997,12 @@ function draw() {
     for (const player of state.players) {
       const screen = worldToScreen(player.x, player.y);
       markerRing(screen.x, screen.y, Math.max(12, 3 * view.scale), "#ff9d2e");
+    }
+  }
+  if (spotlight === "signals" && layers.signals) {
+    for (const signal of signals) {
+      const screen = worldToScreen(signal.x, signal.y);
+      markerRing(screen.x, screen.y, Math.max(8, 2 * view.scale), "#e8dcc8");
     }
   }
   if (spotlight === "tags" && layers.tags) {
@@ -1083,7 +1146,7 @@ async function loadIndex() {
 let indexTimer = null;
 function scheduleIndexRefresh() {
   if (indexTimer) clearTimeout(indexTimer);
-  indexTimer = setTimeout(() => { loadIndex(); loadPollution(); }, 250);
+  indexTimer = setTimeout(() => { loadIndex(); loadPollution(); pollSignals(); }, 250);
 }
 
 let dragging = false;
@@ -1272,6 +1335,34 @@ const UNIT_POLL_MS = 300;
 unitInterval = UNIT_POLL_MS;
 setInterval(pollUnits, UNIT_POLL_MS);
 
+// Signal states change with every train, but a signal never moves, so this is
+// a plain refresh rather than anything interpolated.
+async function pollSignals() {
+  if (!layers.signals || view.scale < SIGNAL_MIN_SCALE) {
+    if (signals.length) { signals = []; requestDraw(); }
+    return;
+  }
+  const topLeft = screenToWorld(0, 0);
+  const bottomRight = screenToWorld(window.innerWidth, window.innerHeight);
+  const query = new URLSearchParams({
+    surface: SURFACE,
+    x1: Math.floor(topLeft.x) - 8,
+    y1: Math.floor(topLeft.y) - 8,
+    x2: Math.ceil(bottomRight.x) + 8,
+    y2: Math.ceil(bottomRight.y) + 8,
+  });
+  try {
+    const payload = await (await fetch("/signals?" + query)).json();
+    signals = payload.signals || [];
+    document.getElementById("signal-count").textContent = signals.length;
+    requestDraw();
+  } catch (error) {
+    /* next tick */
+  }
+}
+
+setInterval(pollSignals, 1000);
+
 const LEGEND = [
   {
     title: "Terrain",
@@ -1298,6 +1389,15 @@ const LEGEND = [
     rows: [
       { label: "nests and worms", match: (key) => key.startsWith("x:"), fallback: "#ff1919", shape: "square", highlight: "color" },
       { label: "biter (radar only)", fixed: "#ff1919", shape: "round", highlight: "units" },
+    ],
+  },
+  {
+    title: "Rail signals",
+    rows: [
+      { label: "clear", fixed: SIGNAL_STATE_COLORS.open, shape: "round", highlight: "signals" },
+      { label: "reserved", fixed: SIGNAL_STATE_COLORS.reserved, shape: "round", highlight: "signals" },
+      { label: "blocked", fixed: SIGNAL_STATE_COLORS.closed, shape: "round", highlight: "signals" },
+      { label: "chain, partly open", fixed: SIGNAL_STATE_COLORS.partially_open, highlight: "signals" },
     ],
   },
   {
@@ -1346,7 +1446,7 @@ function renderLegend() {
 
       // A row can only light something up if its layer is actually drawn.
       const layerFor = { color: "terrain", units: "biters", players: "players", trains: "trains",
-                         tags: "tags", alerts: "alerts" };
+                         tags: "tags", alerts: "alerts", signals: "signals" };
       const live = row.highlight && layers[layerFor[row.highlight]];
       if (!live) line.classList.add("dead");
       line.title = live ? "hover to highlight on the map" : "enable the layer to highlight this";
@@ -1387,8 +1487,9 @@ for (const name of Object.keys(layers)) {
     layers[name] = input.checked;
     if (name === "biters" && input.checked) pollUnits();
     if (name === "pollution" && input.checked) loadPollution();
+    if (name === "signals" && input.checked) pollSignals();
     if (highlight && !layers[{ color: "terrain", units: "biters", players: "players", trains: "trains",
-                               tags: "tags", alerts: "alerts" }[highlight.highlight]]) {
+                               tags: "tags", alerts: "alerts", signals: "signals" }[highlight.highlight]]) {
       highlight = null;
     }
     renderLegend();

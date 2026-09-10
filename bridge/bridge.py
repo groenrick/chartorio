@@ -346,6 +346,34 @@ class RegionCache:
         return payload
 
 
+class ViewportCache:
+    """Same shape as UnitCache but for a payload keyed by a world rectangle."""
+
+    def __init__(self, command, key, ttl):
+        self.command = command
+        self.key = key
+        self.ttl = ttl
+        self.lock = threading.Lock()
+        self.entries = {}
+
+    def get(self, box):
+        now = time.time()
+        with self.lock:
+            entry = self.entries.get(box)
+            if entry and now - entry[0] < self.ttl:
+                return entry[1]
+        payload = call("%s %s %d %d %d %d" % ((self.command,) + box))
+        value = payload.get(self.key)
+        payload[self.key] = value if isinstance(value, list) else []
+        with self.lock:
+            self.entries[box] = (now, payload)
+            if len(self.entries) > 64:
+                for key in [k for k, v in self.entries.items() if now - v[0] > 5]:
+                    self.entries.pop(key, None)
+        return payload
+
+
+SIGNALS = ViewportCache("/chartorio_signals", "signals", 0.5)
 INDEX = RegionCache("/chartorio_chunks", 10.0)
 POLLUTION = RegionCache("/chartorio_pollution", 20.0)
 
@@ -641,6 +669,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"alerts": WORLD.alerts})
         elif path == "/resource":
             self._serve_resource()
+        elif path == "/signals":
+            self._serve_viewport(SIGNALS, "signals")
         elif path == "/units":
             self._serve_units()
         elif path == "/chunks":
@@ -694,6 +724,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(RESOURCES.get(surface, x, y))
         except (OSError, RconError, ValueError) as error:
             self._send_json({"found": False, "error": str(error)})
+
+    def _serve_viewport(self, cache, key):
+        query = self._query()
+        try:
+            box = (query.get("surface", "nauvis"),
+                   int(float(query["x1"])), int(float(query["y1"])),
+                   int(float(query["x2"])), int(float(query["y2"])))
+        except (KeyError, ValueError):
+            return self.send_error(400, "needs x1, y1, x2 and y2")
+        try:
+            self._send_json(cache.get(box))
+        except (OSError, RconError, ValueError) as error:
+            self._send_json({key: [], "error": str(error)})
 
     def _serve_units(self):
         query = self._query()

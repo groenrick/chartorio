@@ -26,6 +26,9 @@ the ragged edge where the charted area stops.*
   like the game does; oil reports a yield percentage instead of a count
 - **Nests and worms** in enemy red, and **live biters** that appear only where
   radar or a player gives current vision
+- **Rail signals** with the state the game has on them right now: clear,
+  reserved, blocked, and the four chain signal states. Round for a plain
+  signal, diamond for a chain signal
 - **Players and trains** live, with train colour by state and click-to-follow.
   Positions arrive four times a second and the page interpolates between them,
   so movement is smooth without polling the game harder
@@ -80,6 +83,18 @@ and the browser re-asks as you pan.
 *A turnout and a junction. Rails ask the game where they actually begin and
 end, so curves bend through the point where their end tangents meet and joins
 land exactly on the neighbouring track.*
+
+### Rail signals
+
+![Signal states along a rail loop](docs/rail-signals.png)
+
+*Chain signals as diamonds, plain signals as circles, each filled with its
+current state. Yellow is partly open, red is blocked, green is clear.*
+
+A headless server has no graphics, so these are drawn rather than taken from
+the game's own sprites. Shipping Factorio's art in this repository is not
+something the licence allows, so the shapes follow how the two signal types
+read apart in game instead.
 
 ### Zoom levels
 
@@ -159,6 +174,7 @@ All settings are environment variables on the bridge service.
 | `/chunks?surface=&x1=&y1=&x2=&y2=` | charted chunks in a rectangle of **chunk** coordinates, with revisions, tile size and map seed |
 | `/tile/<surface>/<z>/<x>/<y>.png` | a tile; `z` may be omitted for native |
 | `/units?surface=&x1=&y1=&x2=&y2=` | biters inside a viewport, vision filtered |
+| `/signals?surface=&x1=&y1=&x2=&y2=` | rail signals inside a viewport, with their state |
 | `/resource?surface=&x=&y=` | patch total under a point |
 | `/pollution?surface=&x1=&y1=&x2=&y2=` | pollution per charted chunk in that rectangle |
 | `/tags`, `/alerts` | map tags and recent losses |

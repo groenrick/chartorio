@@ -773,6 +773,72 @@ commands.add_command("chartorio_alerts", "Recent losses on the player force.", f
   respond({tick = game.tick, alerts = alerts})
 end)
 
+-- Rail signals, with the state the game is actually showing on them. Viewport
+-- scoped like the biters: a built up base holds hundreds of them.
+local SIGNAL_LIMIT = 800
+
+local signal_state_names = {}
+for name, value in pairs(defines.signal_state) do
+  signal_state_names[value] = name
+end
+
+local chain_state_names = {}
+for name, value in pairs(defines.chain_signal_state or {}) do
+  chain_state_names[value] = name
+end
+
+commands.add_command("chartorio_signals", "Rail signals in view: chartorio_signals <surface> <x1> <y1> <x2> <y2>.", function(command)
+  initialise()
+  local surface_name, x1, y1, x2, y2 = string.match(
+    command.parameter or "", "^(%S+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)$")
+  local surface = surface_name and game.surfaces[surface_name]
+  if not surface then
+    return respond({error = "usage: chartorio_signals <surface> <x1> <y1> <x2> <y2>"})
+  end
+  x1, y1, x2, y2 = tonumber(x1), tonumber(y1), tonumber(x2), tonumber(y2)
+
+  local center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
+  local clamped = (x2 - x1) > MAX_QUERY_TILES or (y2 - y1) > MAX_QUERY_TILES
+  if clamped then
+    x1, x2 = center_x - MAX_QUERY_TILES / 2, center_x + MAX_QUERY_TILES / 2
+    y1, y2 = center_y - MAX_QUERY_TILES / 2, center_y + MAX_QUERY_TILES / 2
+  end
+
+  local force = game.forces.player
+  local signals = {}
+  local truncated = false
+  local found = surface.find_entities_filtered({
+    area = {{x1, y1}, {x2, y2}},
+    type = {"rail-signal", "rail-chain-signal"},
+    force = force,
+  })
+  for _, entity in pairs(found) do
+    if #signals >= SIGNAL_LIMIT then
+      truncated = true
+      break
+    end
+    if entity.valid then
+      local chain = entity.type == "rail-chain-signal"
+      local state
+      local ok, value = pcall(function()
+        if chain then return chain_state_names[entity.chain_signal_state] end
+        return signal_state_names[entity.signal_state]
+      end)
+      state = ok and value or "unknown"
+      local position = entity.position
+      signals[#signals + 1] = {
+        x = position.x,
+        y = position.y,
+        direction = entity.direction,
+        chain = chain,
+        state = state or "unknown",
+      }
+    end
+  end
+
+  respond({surface = surface.name, signals = signals, truncated = truncated, clamped = clamped})
+end)
+
 commands.add_command("chartorio_events", "Which change events this build registered.", function()
   local names = {
     "on_built_entity", "on_robot_built_entity", "on_space_platform_built_entity",
