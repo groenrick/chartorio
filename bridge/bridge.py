@@ -401,7 +401,7 @@ def encode_png(width, height, pixels, channels=4):
             + chunk(b"IEND", b""))
 
 
-PALETTE = {"size": 0, "colors": {0: (26, 22, 18)}, "keys": {}}
+PALETTE = {"size": 0, "colors": {0: (26, 22, 18)}, "keys": {}, "structure": set()}
 PALETTE_LOCK = threading.Lock()
 
 
@@ -421,6 +421,11 @@ def refresh_palette(expected_size):
         PALETTE["colors"] = colors
         PALETTE["keys"] = keys
         PALETTE["size"] = len(payload.get("colors", []))
+        # Entity colours, as raw RGB triples, so zooming out can keep thin
+        # structures such as rails instead of averaging them away.
+        PALETTE["structure"] = {
+            bytes(color) for key, color in keys.items() if not key.startswith("t:")
+        }
         return colors
 
 
@@ -444,11 +449,29 @@ def render_leaf(surface, chunk_x, chunk_y):
     return pixels[:expected]
 
 
+def chunk_revision(surface, chunk_x, chunk_y):
+    """The charted set is learned from viewport queries, so a tile can be asked
+    for before anything told us about its chunk. Ask the game about that one
+    chunk rather than refusing to draw it."""
+    revision = WORLD.revision(surface, chunk_x, chunk_y)
+    if revision is not None:
+        return revision
+    try:
+        payload = INDEX.get(surface, (chunk_x, chunk_y, chunk_x, chunk_y))
+    except (OSError, RconError, ValueError):
+        return None
+    chunks = payload.get("chunks") or []
+    if len(chunks) >= 3:
+        WORLD.note_charted(surface, chunks[0], chunks[1], chunks[2])
+        return chunks[2]
+    return None
+
+
 def tile_signature(surface, zoom, tile_x, tile_y):
     """None when nothing under this tile is charted, so there is nothing to draw.
     Otherwise a string that changes whenever any chunk beneath it changes."""
     if zoom == 0:
-        revision = WORLD.revision(surface, tile_x, tile_y)
+        revision = chunk_revision(surface, tile_x, tile_y)
         return None if revision is None else str(revision)
     parts = []
     for offset_y in (0, 1):
@@ -477,6 +500,7 @@ def tile_pixels(surface, zoom, tile_x, tile_y):
         # a zoomed out tile still identifies what it is.
         pixels = bytearray(TILE_PX * TILE_PX * 4)
         half = TILE_PX // 2
+        structure = PALETTE["structure"]
         for offset_y in (0, 1):
             for offset_x in (0, 1):
                 _, child = tile_pixels(surface, zoom - 1, tile_x * 2 + offset_x, tile_y * 2 + offset_y)
@@ -485,9 +509,17 @@ def tile_pixels(surface, zoom, tile_x, tile_y):
                 for row in range(half):
                     source_row = row * 2
                     for column in range(half):
-                        source = (source_row * TILE_PX + column * 2) * 4
+                        base = (source_row * TILE_PX + column * 2) * 4
+                        # Of the four pixels being merged, keep a built thing
+                        # over bare ground: a rail is one tile wide and would
+                        # otherwise disappear at every zoom step.
+                        chosen = base
+                        for candidate in (base, base + 4, base + TILE_PX * 4, base + TILE_PX * 4 + 4):
+                            if child[candidate + 3] and bytes(child[candidate:candidate + 3]) in structure:
+                                chosen = candidate
+                                break
                         target = ((offset_y * half + row) * TILE_PX + offset_x * half + column) * 4
-                        pixels[target:target + 4] = child[source:source + 4]
+                        pixels[target:target + 4] = child[chosen:chosen + 4]
 
     WORLD.put_tile(key, signature, pixels)
     return signature, pixels

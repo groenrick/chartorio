@@ -207,6 +207,53 @@ end)
 -- Rastering
 -- ---------------------------------------------------------------------------
 
+-- A rail's bounding box is an axis aligned square, so filling it throws the
+-- rail's direction away and diagonals come out as blocky staircases. Paint the
+-- rail along its own direction instead, one tile wide, the way the in-game map
+-- draws track.
+local RAIL_TYPES = {
+  ["straight-rail"] = true,
+  ["half-diagonal-rail"] = true,
+  ["curved-rail-a"] = true,
+  ["curved-rail-b"] = true,
+  ["elevated-straight-rail"] = true,
+  ["elevated-half-diagonal-rail"] = true,
+  ["elevated-curved-rail-a"] = true,
+  ["elevated-curved-rail-b"] = true,
+  ["legacy-straight-rail"] = true,
+  ["legacy-curved-rail"] = true,
+  ["rail-ramp"] = true,
+}
+
+local function paint_rail(cells, size, origin_x, origin_y, entity, index)
+  -- Factorio 2.0 counts sixteen directions, so one step is a sixteenth turn.
+  local angle = (entity.direction or 0) * math.pi / 8
+  local step_x, step_y = math.sin(angle), -math.cos(angle)
+  local box = entity.selection_box or entity.bounding_box
+  local length = math.max(
+    box.right_bottom.x - box.left_top.x,
+    box.right_bottom.y - box.left_top.y)
+  if length <= 0 then length = 2 end
+
+  local position = entity.position
+  local samples = math.ceil(length * SUBPIXELS * 2)
+  local across_x = math.floor(-step_y + 0.5)
+  local across_y = math.floor(step_x + 0.5)
+
+  for sample = 0, samples do
+    local along = -length / 2 + length * sample / samples
+    local cell_x = math.floor((position.x + step_x * along - origin_x) * SUBPIXELS)
+    local cell_y = math.floor((position.y + step_y * along - origin_y) * SUBPIXELS)
+    for width = 0, 1 do
+      local x = cell_x + across_x * width
+      local y = cell_y + across_y * width
+      if x >= 0 and y >= 0 and x < size and y < size then
+        cells[y * size + x + 1] = index
+      end
+    end
+  end
+end
+
 local function render_chunk(surface, chunk_x, chunk_y)
   local origin_x, origin_y = chunk_x * CHUNK_SIZE, chunk_y * CHUNK_SIZE
   local area = {{origin_x, origin_y}, {origin_x + CHUNK_SIZE, origin_y + CHUNK_SIZE}}
@@ -229,7 +276,9 @@ local function render_chunk(surface, chunk_x, chunk_y)
   for _, entity in pairs(surface.find_entities_filtered({area = area})) do
     if entity.valid and entity.type ~= "character" and entity.type ~= "item-entity" then
       local index = entity_index(entity.prototype, is_hostile(entity))
-      if index ~= 0 then
+      if index ~= 0 and RAIL_TYPES[entity.type] then
+        paint_rail(cells, size, origin_x, origin_y, entity, index)
+      elseif index ~= 0 then
         local box = entity.selection_box or entity.bounding_box
         local left = math.max(0, math.floor((box.left_top.x - origin_x) * SUBPIXELS))
         local top = math.max(0, math.floor((box.left_top.y - origin_y) * SUBPIXELS))

@@ -18,7 +18,9 @@ the ragged edge where the charted area stops.*
 ## What it shows
 
 - **Terrain and factory** — tiles and entities in their real `map_color`, the
-  same palette the in-game map uses, so it reads exactly like the map view
+  same palette the in-game map uses, so it reads exactly like the map view.
+  Rails are drawn along their own direction rather than as filled bounding
+  boxes, so diagonals stay diagonal instead of turning into staircases
 - **Ore patches** — hover one and the tooltip gives the whole patch's total,
   like the game does; oil reports a yield percentage instead of a count
 - **Nests and worms** in enemy red, and **live biters** that appear only where
@@ -79,9 +81,11 @@ and the browser re-asks as you pan.
 One tile per chunk is fine at spawn and hopeless across a real base. Zoom
 levels 1 to 3 combine 2×2, 4×4 and 8×8 chunks into one tile, built by halving
 cached child tiles rather than asking the game again. At zoom 3 that is one
-request instead of 64. Downscaling is nearest-neighbour on purpose: palette
-colours must survive so that hovering a zoomed-out tile still identifies what
-is under the cursor.
+request instead of 64. Downscaling keeps palette colours exact rather than
+averaging them, so hovering a zoomed-out tile still identifies what is under
+the cursor, and it prefers a built thing over bare ground when merging four
+pixels into one — otherwise a rail, being one tile wide, would vanish at every
+zoom step.
 
 ## Requirements
 
