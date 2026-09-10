@@ -1,0 +1,44 @@
+name: tests
+
+# Pull requests from forks run with a read-only token and no secrets, which is
+# what makes it safe to run a contributor's branch on GitHub's own runners.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"   # the oldest a bare server is likely to have
+
+      - name: Bridge and tools
+        run: python -m unittest discover -s tests -v
+
+      - name: The page boots
+        run: node --test tests/*.mjs
+
+      - name: Everything compiles
+        run: python -m compileall -q bridge tools tests
+
+  scenario:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install luacheck
+        run: sudo apt-get update && sudo apt-get install -y lua-check
+
+      # An uncaught error in a command does not kill the command, it kills the
+      # server. A `nil` in a table literal makes a hole that hides everything
+      # behind it. Both are the kind of thing a linter sees and review does not.
+      - name: Lint the scenario
+        run: luacheck scenario/control.lua
