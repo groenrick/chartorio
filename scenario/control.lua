@@ -26,6 +26,7 @@ require('__base__/script/freeplay/control.lua')
 --   /chartorio_alerts     recent losses on the player force
 --   /chartorio_tags       map tags placed in game
 --   /chartorio_resource   the total of the ore patch under a point
+--   /chartorio_entities   entities in view for the sprite layer, visible chunks
 --   /chartorio_events     which change events this build registered
 --
 -- tests/test_contract.py checks this list against what the bridge calls: an
@@ -397,6 +398,9 @@ end
 
 local UNIT_LIMIT = 600
 local MAX_QUERY_TILES = 512
+-- Sprites are only drawn from about eight pixels to a world tile, where a wide
+-- screen is roughly 400 tiles across.
+local SPRITE_QUERY_TILES = 448
 
 -- ---------------------------------------------------------------------------
 -- Live entities
@@ -926,6 +930,90 @@ commands.add_command("chartorio_signals", "Rail signals in view: chartorio_signa
   respond({
     surface = surface.name,
     signals = signals,
+    truncated = truncated,
+    clamped = clamped,
+    scanned = scanned,
+  })
+end)
+
+-- ---------------------------------------------------------------------------
+-- Entities for the sprite layer
+--
+-- Only asked for when the browser is zoomed in far enough to draw real
+-- sprites, and only for chunks that are currently visible, the same rule the
+-- biters use: radar or a player, not merely charted. A screen at eight pixels
+-- to a world tile is about ten chunks across, so this searches a small area,
+-- but it is still an entity search and the viewport is clamped anyway.
+-- ---------------------------------------------------------------------------
+
+local ENTITY_LIMIT = 1200
+
+commands.add_command("chartorio_entities", "Entities in view for the sprite layer: chartorio_entities <surface> <x1> <y1> <x2> <y2>.", function(command)
+  initialise()
+  local surface_name, x1, y1, x2, y2 = string.match(
+    command.parameter or "", "^(%S+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)$")
+  local surface = surface_name and game.surfaces[surface_name]
+  if not surface then
+    return respond({error = "usage: chartorio_entities <surface> <x1> <y1> <x2> <y2>"})
+  end
+  x1, y1, x2, y2 = tonumber(x1), tonumber(y1), tonumber(x2), tonumber(y2)
+
+  -- Sprites are only drawn close in, so a large request is a mistake rather
+  -- than something to serve slowly.
+  local center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
+  local half = SPRITE_QUERY_TILES / 2
+  local clamped = (x2 - x1) > SPRITE_QUERY_TILES or (y2 - y1) > SPRITE_QUERY_TILES
+  if clamped then
+    x1, x2 = center_x - half, center_x + half
+    y1, y2 = center_y - half, center_y + half
+  end
+
+  local force = game.forces.player
+  local entities = {}
+  local truncated = false
+  local scanned = 0
+
+  for chunk_y = math.floor(y1 / CHUNK_SIZE), math.floor(y2 / CHUNK_SIZE) do
+    for chunk_x = math.floor(x1 / CHUNK_SIZE), math.floor(x2 / CHUNK_SIZE) do
+      -- Visible, not charted. The game only draws what radar or a player can
+      -- currently see, and the map does not get to show more than the game.
+      if force.is_chunk_visible(surface, {chunk_x, chunk_y}) then
+        scanned = scanned + 1
+        local area = {
+          {math.max(x1, chunk_x * CHUNK_SIZE), math.max(y1, chunk_y * CHUNK_SIZE)},
+          {math.min(x2, chunk_x * CHUNK_SIZE + CHUNK_SIZE), math.min(y2, chunk_y * CHUNK_SIZE + CHUNK_SIZE)},
+        }
+        for _, entity in pairs(surface.find_entities_filtered({area = area})) do
+          if #entities >= ENTITY_LIMIT then
+            truncated = true
+            break
+          end
+          -- Anything that moves is already its own live layer, drawn from a
+          -- faster poll; drawing it here as well would show it twice, a few
+          -- hundred milliseconds apart.
+          local kind = entity.type
+          if kind ~= "character" and kind ~= "unit" and kind ~= "car"
+             and kind ~= "locomotive" and kind ~= "cargo-wagon"
+             and kind ~= "fluid-wagon" and kind ~= "artillery-wagon"
+             and kind ~= "item-entity" and kind ~= "particle-source" then
+            local position = entity.position
+            entities[#entities + 1] = {
+              n = entity.name,
+              x = math.floor(position.x * 8) / 8,
+              y = math.floor(position.y * 8) / 8,
+              d = entity.direction or 0,
+            }
+          end
+        end
+      end
+      if truncated then break end
+    end
+    if truncated then break end
+  end
+
+  respond({
+    surface = surface.name,
+    entities = entities,
     truncated = truncated,
     clamped = clamped,
     scanned = scanned,

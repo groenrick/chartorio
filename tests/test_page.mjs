@@ -113,7 +113,9 @@ function boot() {
   // `let` and `const` at the top level of a script do not become properties of
   // the context the way `function` and `var` do, so the few the tests need are
   // handed out by an epilogue running in the same scope.
-  const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES,"
+  const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES, layers,"
+              + " SPRITE_PIXELS_PER_TILE, spritesWanted,"
+              + " __setSpritesAvailable(v) { spritesAvailable = v; },"
               + " get transport() { return transport; } };";
   vm.runInContext(extractScript(html) + probe, context, { filename: "index.html" });
   // Keep the accessors as accessors, so `transport` stays live, and let
@@ -193,6 +195,45 @@ test("the event stream fallback listens for the viewer count too", () => {
   page.useEventStream();
   assert.ok(page.eventChannels.includes("viewers"),
             `/events subscribed to ${page.eventChannels.join(", ")}`);
+});
+
+test("a sprite covers the world size its scale implies", () => {
+  // Factorio draws at 32 pixels to a world tile, so a 151px sprite at scale
+  // 0.5 is 151*0.5/32 = 2.36 tiles across. Getting this wrong by the factor of
+  // 32 draws one chest where a whole building belongs.
+  const page = boot();
+  assert.equal(page.SPRITE_PIXELS_PER_TILE, 32);
+  const tiles = 151 * 0.5 / page.SPRITE_PIXELS_PER_TILE;
+  assert.ok(Math.abs(tiles - 2.359) < 0.01, `stone furnace came out ${tiles} tiles wide`);
+});
+
+test("sprites stay off until the view is zoomed in far enough", () => {
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.layers.terrain = true;
+  page.view.scale = 4;
+  assert.equal(page.spritesWanted(), false, "4 px a tile is too far out for sprites");
+  page.view.scale = 8;
+  assert.equal(page.spritesWanted(), true, "8 px a tile is the threshold, inclusive");
+  page.view.scale = 24;
+  assert.equal(page.spritesWanted(), true);
+});
+
+test("sprites are off entirely when the server has no artwork", () => {
+  const page = boot();
+  page.__setSpritesAvailable(false);
+  page.layers.terrain = true;
+  page.view.scale = 24;
+  assert.equal(page.spritesWanted(), false,
+               "a bridge with no sprite directory must not make the page ask");
+});
+
+test("turning the terrain layer off takes its sprites with it", () => {
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.view.scale = 24;
+  page.layers.terrain = false;
+  assert.equal(page.spritesWanted(), false);
 });
 
 test("ore totals read the way the game writes them", () => {

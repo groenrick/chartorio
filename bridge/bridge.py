@@ -42,6 +42,12 @@ MAX_ZOOM = int(os.environ.get("CHARTORIO_MAX_ZOOM", "3"))
 TILE_PX = 64
 # strict keeps the fog honest: only charted chunks can be rendered at all.
 FOG = os.environ.get("CHARTORIO_FOG", "strict")
+# Real game art, extracted from a licensed install by render/sprites.py. Unset
+# means the map behaves exactly as it did before: flat prototype colours.
+SPRITE_DIR = os.environ.get("CHARTORIO_SPRITES", "")
+# Screen pixels to a world tile at which sprites are worth drawing. Below this
+# an entity is a few pixels across and the colour tiles read better.
+SPRITE_MIN_SCALE = float(os.environ.get("CHARTORIO_SPRITE_SCALE", "8"))
 
 
 def _static_dir():
@@ -583,7 +589,27 @@ class ViewportCache:
         return payload
 
 
+def sprite_path(name):
+    """Where a sprite lives on disk, or None if the name is not one.
+
+    The name is checked apart rather than joined on and hoped for: a sprite is
+    addressed by prototype name, which is a single path segment of letters,
+    digits and dashes. Anything else — a slash, a dot, an empty stem — is
+    refused before the filesystem is touched at all, so no request can walk out
+    of the sprite directory.
+    """
+    if not SPRITE_DIR or not name.endswith(".png"):
+        return None
+    stem = name[:-4]
+    if not stem or len(stem) > 200:
+        return None
+    if not all(c.isalnum() or c in "-_" for c in stem):
+        return None
+    return os.path.join(SPRITE_DIR, stem + ".png")
+
+
 SIGNALS = ViewportCache("/chartorio_signals", "signals", 0.5)
+ENTITIES = ViewportCache("/chartorio_entities", "entities", 1.0)
 INDEX = RegionCache("/chartorio_chunks", 10.0)
 POLLUTION = RegionCache("/chartorio_pollution", 20.0)
 
@@ -955,6 +981,7 @@ class Handler(BaseHTTPRequestHandler):
                 "game_thread_seconds": {name: round(value, 2) for name, value in seconds.items()},
                 "game_thread_share": round(sum(seconds.values()) / uptime, 4),
                 "tiles_cached": len(WORLD.tiles),
+                "sprites": bool(SPRITE_DIR),
             })
         elif path == "/palette":
             if PALETTE["size"] == 0:  # nothing rendered yet, fetch it once up front
@@ -976,6 +1003,14 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_resource()
         elif path == "/signals":
             self._serve_viewport(SIGNALS, "signals")
+        elif path == "/entities":
+            if not SPRITE_DIR:
+                return self._send_json({"entities": [], "sprites": False})
+            self._serve_viewport(ENTITIES, "entities")
+        elif path == "/sprites/index.json":
+            self._serve_sprite_index()
+        elif path.startswith("/sprites/"):
+            self._serve_sprite(path)
         elif path == "/units":
             self._serve_units()
         elif path == "/chunks":
@@ -1036,6 +1071,38 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(RESOURCES.get(surface, x, y))
         except (OSError, RconError, ValueError) as error:
             self._send_json({"found": False, "error": str(error)})
+
+    def _serve_sprite_index(self):
+        """What the page needs to draw each prototype, plus the zoom at which
+        it should start. Absent sprites are not an error: the page falls back
+        to the colour tiles for anything it has no art for."""
+        if not SPRITE_DIR:
+            return self._send_json({"sprites": {}, "available": False})
+        try:
+            with open(os.path.join(SPRITE_DIR, "index.json"), "rb") as handle:
+                payload = json.loads(handle.read().decode("utf-8"))
+        except (OSError, ValueError):
+            return self._send_json({"sprites": {}, "available": False})
+        payload["available"] = True
+        payload["min_scale"] = SPRITE_MIN_SCALE
+        self._send_json(payload)
+
+    def _serve_sprite(self, path):
+        target = sprite_path(path[len("/sprites/"):])
+        if target is None:
+            return self.send_error(404, "bad sprite name")
+        try:
+            with open(target, "rb") as handle:
+                body = handle.read()
+        except OSError:
+            return self.send_error(404, "no such sprite")
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(body)))
+        # Artwork for a prototype never changes, so let the browser keep it.
+        self.send_header("Cache-Control", "public, max-age=604800")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve_viewport(self, cache, key):
         query = self._query()

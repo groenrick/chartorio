@@ -1010,6 +1010,97 @@ function drawAlerts() {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Real game sprites
+//
+// Close in, the colour blocks stop being enough and the actual artwork is
+// worth the bytes. Sprites are drawn only above SPRITE_MIN_SCALE screen pixels
+// to a world tile, and only where the game currently has vision, so the map
+// still never shows more than the game would.
+//
+// Factorio draws at 32 pixels to a world tile, so a sprite `width` pixels
+// across at `scale` s covers width*s/32 world tiles, centred on the entity
+// position plus its shift, which is already in world tiles.
+// ---------------------------------------------------------------------------
+const SPRITE_PIXELS_PER_TILE = 32;
+let spriteIndex = null;          // prototype -> {file, width, height, scale, shift, ...}
+let spriteMinScale = 8;
+let spriteImages = new Map();    // file -> HTMLImageElement
+let spriteEntities = [];         // what the server last said is in view
+let spriteRequest = null;
+let spritesAvailable = false;
+
+function spritesWanted() {
+  return spritesAvailable && layers.terrain && view.scale >= spriteMinScale;
+}
+
+async function loadSpriteIndex() {
+  try {
+    const payload = await (await fetch("/sprites/index.json")).json();
+    spritesAvailable = Boolean(payload.available);
+    spriteIndex = payload.sprites || {};
+    if (payload.min_scale) spriteMinScale = payload.min_scale;
+  } catch (error) {
+    spritesAvailable = false;
+  }
+}
+
+function spriteImage(file) {
+  let image = spriteImages.get(file);
+  if (image) return image;
+  image = new Image();
+  image.onload = requestDraw;
+  // A sprite that fails to load must not be retried every frame.
+  image.onerror = () => { image.failed = true; };
+  image.src = "/sprites/" + file;
+  spriteImages.set(file, image);
+  return image;
+}
+
+function requestSprites() {
+  if (!spritesWanted()) {
+    if (spriteEntities.length) { spriteEntities = []; requestDraw(); }
+    return;
+  }
+  const box = viewportBox();
+  const key = `${box.x1},${box.y1},${box.x2},${box.y2}`;
+  if (spriteRequest === key) return;
+  spriteRequest = key;
+  const query = new URLSearchParams({ surface: SURFACE, x1: box.x1, y1: box.y1, x2: box.x2, y2: box.y2 });
+  fetch("/entities?" + query)
+    .then((response) => response.json())
+    .then((payload) => {
+      spriteEntities = Array.isArray(payload.entities) ? payload.entities : [];
+      requestDraw();
+    })
+    .catch(() => {});
+}
+
+function drawSprites() {
+  if (!spritesWanted() || !spriteIndex) return;
+  for (const entity of spriteEntities) {
+    const meta = spriteIndex[entity.n];
+    if (!meta) continue;                       // no art: the colour tile stands
+    const image = spriteImage(meta.file);
+    if (!image.complete || image.failed || !image.naturalWidth) continue;
+
+    const tilesWide = meta.width * meta.scale / SPRITE_PIXELS_PER_TILE;
+    const tilesHigh = meta.height * meta.scale / SPRITE_PIXELS_PER_TILE;
+    const centre = worldToScreen(entity.x + (meta.shift[0] || 0),
+                                 entity.y + (meta.shift[1] || 0));
+    const width = tilesWide * view.scale;
+    const height = tilesHigh * view.scale;
+    try {
+      context.drawImage(image,
+        meta.x || 0, meta.y || 0, meta.width, meta.height,
+        centre.x - width / 2, centre.y - height / 2, width, height);
+    } catch (error) {
+      image.failed = true;                     // a bad crop must not kill the frame
+    }
+  }
+}
+
 function draw() {
   updateCenterPoint();
   followTarget();
@@ -1024,6 +1115,7 @@ function draw() {
     dimMap();
   }
 
+  drawSprites();
   if (layers.pollution) drawPollution();
   drawGrid();
   if (layers.biters) drawUnits();
@@ -1194,6 +1286,7 @@ function viewportBox() {
 function sendViewport(immediate = false) {
   if (viewportTimer) clearTimeout(viewportTimer);
   const send = () => {
+    requestSprites();
     const box = viewportBox();
     if (transport === "websocket") {
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -1677,6 +1770,7 @@ function connect() {
     setStatus("connected", true);
     sendViewport(true);
     loadPalette();
+    loadSpriteIndex().then(requestSprites);
   };
 
   socket.onmessage = (event) => handleMessage(event.data);
