@@ -82,6 +82,13 @@ Everything the bridge calls is a registered command.
   as a websocket that cannot connect.
 - **Keep the event-stream fallback.** Some networks pass ordinary HTTP but
   refuse a plain `ws://` upgrade. `/events` carries the same channels.
+- **The handshake GUID is a fixed constant and a typo in it is silent.** A
+  wrong `Sec-WebSocket-Accept` makes every browser refuse the upgrade, the page
+  falls back to `/events`, and the map works, so nothing looks broken. The
+  bridge shipped a mistyped GUID from the day WebSockets were added until a
+  test compared it against the value in RFC 6455. Fall back on purpose, never
+  by accident: if the status line says event stream on a network you control,
+  the websocket is broken, not the network.
 - **Serve the page with `no-store`**, or browsers keep an old page across a
   redeploy and appear to poll endpoints that no longer exist.
 - Tiles are PNGs written by hand over `zlib`; there is no image library.
@@ -106,6 +113,32 @@ polling cost nothing and two entity searches cost half the game thread.
   row during this project were the test, not the code: a pan into unexplored
   ground, counting requests that a callback had already refilled, and asserting
   on totals instead of deltas.
+
+## Issues
+
+Reports from outside come in through the forms in `.github/ISSUE_TEMPLATE`,
+which ask for the things that decide where a fault lives: which of the three
+parts, websocket or `/events`, and the output of `/status`. Those forms do not
+apply when writing an issue by hand or with `gh`, so use this shape instead:
+
+```
+<one paragraph: what the situation is today, and why it is that way>
+
+## Approach
+## Constraints that shape it
+## Done when
+```
+
+**Constraints is the section that earns its place.** The interesting changes in
+this project are nearly all a fix for something non-obvious, and an issue is
+where that knowledge lands before any code exists. Cost on the game thread,
+charted versus visible, what cannot be committed here: write it down when the
+issue is opened, not when the pull request is reviewed.
+
+**Done when** is a test someone else can apply, not a restatement of the title.
+
+Do not ask an outside reporter for constraints they cannot know. Take what
+their form gives and write the shaped issue yourself.
 
 ## Commits
 
