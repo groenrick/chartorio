@@ -26,6 +26,8 @@ the ragged edge where the charted area stops.*
   like the game does; oil reports a yield percentage instead of a count
 - **Nests and worms** in enemy red, and **live biters** that appear only where
   radar or a player gives current vision
+- **Keyboard panning** with `wasd` or the arrow keys, `shift` to move faster,
+  alongside dragging and scroll-to-zoom
 - **Rail signals** with the state the game has on them right now: clear,
   reserved, blocked, and the four chain signal states. Round for a plain
   signal, diamond for a chain signal

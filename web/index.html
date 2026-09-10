@@ -201,7 +201,7 @@
 <div id="tooltip" hidden></div>
 
 <div id="hud">
-  <span id="cursor">0, 0</span> &nbsp;·&nbsp; <span id="zoom">2.0</span> px/tile &nbsp;·&nbsp; drag to pan, scroll to zoom, <kbd>esc</kbd> unfollow
+  <span id="cursor">0, 0</span> &nbsp;·&nbsp; <span id="zoom">2.0</span> px/tile &nbsp;·&nbsp; <kbd>wasd</kbd> or drag to pan, scroll to zoom, <kbd>esc</kbd> unfollow
 </div>
 
 <script>
@@ -1349,9 +1349,60 @@ canvas.addEventListener("wheel", (event) => {
   requestDraw();
 }, { passive: false });
 
+// Keyboard panning. Speed is in screen pixels per second so it feels the same
+// at every zoom level, and holding shift covers ground faster.
+const PAN_KEYS = {
+  w: [0, -1], a: [-1, 0], s: [0, 1], d: [1, 0],
+  arrowup: [0, -1], arrowleft: [-1, 0], arrowdown: [0, 1], arrowright: [1, 0],
+};
+const PAN_PIXELS_PER_SECOND = 900;
+const held = new Set();
+let panFrame = null;
+let panLastFrame = 0;
+
+function panStep(timestamp) {
+  if (held.size === 0) { panFrame = null; return; }
+  const elapsed = panLastFrame ? Math.min(0.1, (timestamp - panLastFrame) / 1000) : 0;
+  panLastFrame = timestamp;
+
+  let dx = 0;
+  let dy = 0;
+  for (const key of held) {
+    const direction = PAN_KEYS[key];
+    if (direction) { dx += direction[0]; dy += direction[1]; }
+  }
+  if (dx || dy) {
+    const length = Math.hypot(dx, dy) || 1;
+    const distance = (PAN_PIXELS_PER_SECOND / view.scale) * elapsed * (held.has("shift") ? 2.5 : 1);
+    follow = null;
+    view.x += (dx / length) * distance;
+    view.y += (dy / length) * distance;
+    sendViewport();
+    requestDraw();
+  }
+  panFrame = requestAnimationFrame(panStep);
+}
+
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") { follow = null; renderPanel(); }
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const target = event.target;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+
+  const key = event.key.toLowerCase();
+  if (key === "escape") { follow = null; setActiveLegendRow(null); renderPanel(); return; }
+  if (key === "shift" || PAN_KEYS[key]) {
+    if (PAN_KEYS[key]) event.preventDefault();
+    held.add(key);
+    if (!panFrame) { panLastFrame = 0; panFrame = requestAnimationFrame(panStep); }
+  }
 });
+
+window.addEventListener("keyup", (event) => {
+  held.delete(event.key.toLowerCase());
+});
+
+// Losing focus mid-key would otherwise leave the map drifting forever.
+window.addEventListener("blur", () => held.clear());
 
 window.addEventListener("resize", resize);
 

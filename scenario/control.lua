@@ -398,10 +398,20 @@ local function get_trains(surface)
   return surface.get_trains()
 end
 
+-- player.position follows whatever the player is controlling, so opening the
+-- in-game map and panning moves it with the view. The character's own position
+-- is what belongs on a map.
+local function physical_position_of(player)
+  local ok, position = pcall(function() return player.physical_position end)
+  if ok and position then return position end
+  if player.character and player.character.valid then return player.character.position end
+  return player.position
+end
+
 local function collect_players()
   local players = {}
   for _, player in pairs(game.connected_players) do
-    local position = player.position
+    local position = physical_position_of(player)
     players[#players + 1] = {
       name = player.name,
       surface = player.surface.name,
