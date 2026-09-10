@@ -5,12 +5,21 @@ Standard library only, like the bridge itself, so this runs anywhere Python 3
 does. Nothing here opens a socket or talks RCON: the pieces under test are the
 pure ones, and the two that are not are stubbed.
 """
+import faulthandler
 import os
 import struct
 import sys
 import threading
 import unittest
 import zlib
+
+# The hub is threaded and its lock is not reentrant, so a mistake there does not
+# fail a test, it stops the thread that touched it. unittest has no per-test
+# timeout, and the first test to call hub.add() runs on the main thread, so the
+# whole suite would hang until CI eventually kills the job. This turns any hang
+# into a failure with a traceback pointing at the line that is stuck. The suite
+# takes well under a second, so this can only fire on a real hang.
+faulthandler.dump_traceback_later(60, exit=True)
 
 # The bridge reads its configuration at import time and has no default for the
 # password, so this has to be set before the import.
@@ -222,7 +231,8 @@ class ViewerCount(unittest.TestCase):
     def test_the_lock_is_free_while_the_count_goes_out(self):
         # broadcast() takes the hub lock again through snapshot(), and a plain
         # Lock is not reentrant: announcing inside it would hang the connection
-        # thread, and with it every browser.
+        # thread, and with it every browser. Run on a worker so this one reports
+        # the deadlock itself rather than leaning on the module's watchdog.
         done = threading.Event()
 
         def join_and_leave():
