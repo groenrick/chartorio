@@ -71,9 +71,18 @@ Everything the bridge calls is a registered command.
 ## The bridge
 
 - **RCON responses**: a long answer may be one large packet or several
-  fragments, and nothing in the protocol says which. After a long packet, wait
-  briefly and treat silence as the end; do not block waiting for a fragment
-  that never comes.
+  fragments, and nothing in the protocol says which. Do not wait out a timeout
+  to find out. Waiting cost 300ms on *every* response over about four kilobytes,
+  which made whole layers look unaffordable: the items on belts measured 371ms
+  a call and saturated the game thread, and 318ms of that was the bridge
+  waiting for a packet that was never coming. Send a second trivial question
+  instead — `/chartorio_marker` — because the server answers in order, so its
+  reply arriving proves the first answer is complete. The same call then
+  measured 53ms, and every other poll on the map got faster with it.
+- **`/status` measures wall time round the RCON call**, not time on the game
+  thread. Anything that makes the bridge wait — a fragment timeout, a slow
+  socket — shows up as though the game were doing the work. Check what a number
+  is actually made of before optimising the wrong end of it.
 - **Percent decode query values.** A browser sends the comma in
   `chunks=-15,-9,15,9` as `%2C`; reading it raw produced a viewport the server
   could not parse and an empty map with every other channel working.
