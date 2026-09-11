@@ -252,6 +252,20 @@ def tree_variations(prototype):
     return out or None
 
 
+def footprint(prototype):
+    """How many tiles the thing covers, from its selection box. Used to draw a
+    plain coloured block for anything with no extracted art, so a prototype
+    this extract has never seen is still visible on the map."""
+    box = prototype.get("selection_box") or prototype.get("collision_box")
+    try:
+        (x1, y1), (x2, y2) = box[0], box[1]
+        width = max(1, round(float(x2) - float(x1)))
+        height = max(1, round(float(y2) - float(y1)))
+        return [width, height]
+    except (TypeError, ValueError, IndexError):
+        return [1, 1]
+
+
 def resolve(filename, data_dir):
     """`__base__/graphics/...` points into the game's data directory."""
     if not filename.startswith("__"):
@@ -336,7 +350,7 @@ def main():
         wanted, wanted_tiles = set(entities), set(terrain)
 
     os.makedirs(args.out, exist_ok=True)
-    index, copied, skipped = {}, {}, set()
+    index, copied, skipped, boxes = {}, {}, set(), {}
 
     for category, entries in raw.items():
         if not isinstance(entries, dict):
@@ -429,9 +443,22 @@ def main():
             if not entry:
                 if wanted is not None:
                     skipped.add(name)
+                    # Kept for a second pass rather than recorded now: several
+                    # categories share a name — there is a collision-layer
+                    # called "cliff" as well as the cliff entity — and claiming
+                    # it here would shut out the one that actually has art.
+                    boxes.setdefault(name, footprint(prototype))
                 continue
             entry["category"] = category
+            entry["tiles"] = footprint(prototype)
             index[name] = entry
+
+    # Anything with no art at all still needs to be drawn, or it vanishes: the
+    # terrain layer paints over the colour map, so the block that used to stand
+    # in for it is gone. An extract is a snapshot of what a world had when it
+    # was taken, and something built afterwards must not become invisible.
+    for name, tiles in boxes.items():
+        index.setdefault(name, {"kind": "none", "tiles": tiles})
 
     # Terrain. Only the tiles this world has, which the palette also lists.
     tiles = {}
