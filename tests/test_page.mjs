@@ -68,13 +68,14 @@ function boot() {
     setTimeout: (fn) => { timers.push(fn); return timers.length; },
     clearTimeout: () => {}, setInterval: () => 1, clearInterval: () => {},
     fetch: () => new Promise(() => {}),           // never settles: no network here
-    location: { protocol: "http:", host: "localhost:8080", href: "http://localhost:8080/" },
+    location: { protocol: "http:", host: "localhost:8080", href: "http://localhost:8080/", hash: "" },
     devicePixelRatio: 1,
     innerWidth: 1280,
     innerHeight: 720,
     addEventListener() {}, removeEventListener() {},
     matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    history: { replaceState(_s, _t, url) { context.__lastUrl = url; }, pushState() {} },
     Image: class { set src(_v) {} constructor() { this.onload = null; this.onerror = null; } },
     WebSocket: class {
       static OPEN = 1;
@@ -116,6 +117,8 @@ function boot() {
   const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES, layers,"
               + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers, spriteCell, spriteKey,"
               + " expandRuns, tileVariant, terrainKey, terrainCovers, spriteDepth,"
+              + " encodeView, decodeView, applyView, viewPrecision, LAYER_BITS,"
+              + " get follow() { return follow; }, set follow(v) { follow = v; },"
               + " __setSpriteIndex(v) { spriteIndex = v; },"
               + " __setTerrain(x, y, rev) { terrainCache.set(terrainKey(x, y), { revision: rev, canvas: {} }); },"
               + " __setCharted(x, y, rev) { charted.set(key(x, y), rev); },"
@@ -494,6 +497,94 @@ test("depth beats position, so a belt on ore stays visible", () => {
   const ore = { n: "coal", y: 10 };
   const ordered = [belt, ore].sort((a, b) => page.spriteDepth(a) - page.spriteDepth(b) || a.y - b.y);
   assert.equal(ordered[0].n, "coal", "ore must be drawn first");
+});
+
+test("the view round trips through the URL", () => {
+  // Within the precision the zoom justifies, not exactly: at 2 pixels to a
+  // tile one decimal is already finer than a pixel, and that rounding is the
+  // point of the scheme.
+  const page = boot();
+  page.view.x = -12.5; page.view.y = 40.25; page.view.scale = 2;
+  const hash = page.encodeView();
+  page.view.x = 0; page.view.y = 0; page.view.scale = 8;
+  page.applyView(page.decodeView(hash));
+  assert.ok(Math.abs(page.view.x + 12.5) <= 0.05, `x came back ${page.view.x}`);
+  assert.ok(Math.abs(page.view.y - 40.25) <= 0.05, `y came back ${page.view.y}`);
+  assert.equal(page.view.scale, 2);
+});
+
+test("zoomed in, the position keeps the precision it needs", () => {
+  const page = boot();
+  page.view.x = 96.25; page.view.y = -45.75; page.view.scale = 24;
+  page.applyView(page.decodeView(page.encodeView()));
+  assert.equal(page.view.x, 96.25, "at 24 px a tile two decimals survive");
+  assert.equal(page.view.y, -45.75);
+});
+
+test("layers survive as a bitmask, not a list of names", () => {
+  const page = boot();
+  page.layers.terrain = true; page.layers.biters = false; page.layers.pollution = true;
+  const hash = page.encodeView();
+  assert.ok(hash.length < 40, `too long to share: ${hash}`);
+  page.layers.terrain = false; page.layers.pollution = false; page.layers.biters = true;
+  page.applyView(page.decodeView(hash));
+  assert.equal(page.layers.terrain, true);
+  assert.equal(page.layers.biters, false);
+  assert.equal(page.layers.pollution, true, "pollution is off by default, so it must be carried explicitly");
+});
+
+test("position is rounded to what the zoom can distinguish", () => {
+  const page = boot();
+  assert.equal(page.viewPrecision(0.05), 0, "zoomed right out, whole tiles are enough");
+  assert.equal(page.viewPrecision(2), 1);
+  assert.equal(page.viewPrecision(24), 2);
+  page.view.scale = 0.05; page.view.x = -1234.56789; page.view.y = 1.5;
+  assert.ok(!page.encodeView().includes(".56789"), "far out, decimals are noise");
+});
+
+test("a scale beyond the map's limits is clamped, not honoured", () => {
+  const page = boot();
+  page.applyView(page.decodeView("#1/0/0/9999/ff"));
+  assert.equal(page.view.scale, 24);
+  page.applyView(page.decodeView("#1/0/0/0.0001/ff"));
+  assert.equal(page.view.scale, 0.05);
+});
+
+test("a mangled hash is ignored rather than fatal", () => {
+  const page = boot();
+  for (const bad of ["", "#", "#garbage", "#1", "#1//", "#9/0/0/2/ff", "#1/x/y/z/!!"]) {
+    const asked = page.decodeView(bad);
+    if (asked) page.applyView(asked);          // must not throw
+  }
+  assert.ok(Number.isFinite(page.view.x), "the view survived every mangled link");
+});
+
+test("an old format version is not misread as the current one", () => {
+  // The version exists so a future scheme can be told apart rather than
+  // silently decoded as nonsense.
+  const page = boot();
+  assert.equal(page.decodeView("#9/1/2/3/ff"), null);
+});
+
+test("following someone is carried, and is absent when nobody is followed", () => {
+  const page = boot();
+  page.follow = null;
+  assert.ok(!page.encodeView().includes(":"), "no follow, no field");
+  page.follow = { kind: "player", id: "rikkert996" };
+  const hash = page.encodeView();
+  assert.ok(hash.includes("p:rikkert996"));
+  page.follow = null;
+  page.applyView(page.decodeView(hash));
+  assert.deepEqual({ ...page.follow }, { kind: "player", id: "rikkert996" });
+});
+
+test("a followed train id comes back as a number", () => {
+  // Trains are looked up by id, and "12" would never match 12.
+  const page = boot();
+  page.applyView(page.decodeView("#1/0/0/2/ff/nauvis/t:12"));
+  assert.equal(page.follow.kind, "train");
+  assert.equal(page.follow.id, 12);
+  assert.equal(typeof page.follow.id, "number");
 });
 
 test("ore totals read the way the game writes them", () => {
