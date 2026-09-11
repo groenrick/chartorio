@@ -407,6 +407,24 @@ def tile_sprite(prototype):
     return None
 
 
+def item_icon(prototype):
+    """An item's inventory icon, which is what the game draws on a belt.
+
+    Icons ship with their mipmaps packed alongside, so a 64 pixel icon lives in
+    a 120 pixel wide file and only the leftmost square is wanted."""
+    icons = prototype.get("icons")
+    filename = prototype.get("icon")
+    size = prototype.get("icon_size")
+    if not filename and isinstance(icons, list) and icons:
+        first = icons[0]
+        if isinstance(first, dict):
+            filename = first.get("icon")
+            size = first.get("icon_size", size)
+    if not filename:
+        return None
+    return {"filename": filename, "size": size or 64}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -577,13 +595,35 @@ def main():
         info["file"] = copied[source]
         tiles[name] = info
 
+    # Item icons, for what is moving on the belts. Everything that can sit on
+    # a belt is an item, and the set is small next to the entity art.
+    items = {}
+    for category in ("item", "ammo", "capsule", "module", "gun", "armor",
+                     "tool", "repair-tool", "rail-planner", "item-with-entity-data"):
+        for name, prototype in (raw.get(category) or {}).items():
+            if not isinstance(prototype, dict) or name in items:
+                continue
+            info = item_icon(prototype)
+            if not info:
+                continue
+            source = resolve(info["filename"], data_dir)
+            if not source or not os.path.isfile(source):
+                continue
+            if source not in copied:
+                target = os.path.basename(source)
+                while target in copied.values():
+                    target = "_" + target
+                shutil.copy2(source, os.path.join(args.out, target))
+                copied[source] = target
+            items[name] = {"file": copied[source], "size": info["size"]}
+
     with open(os.path.join(args.out, "index.json"), "w") as handle:
         json.dump({"version": 1, "pixels_per_tile": 32,
-                   "sprites": index, "tiles": tiles}, handle, indent=1)
+                   "sprites": index, "tiles": tiles, "items": items}, handle, indent=1)
 
     size = sum(os.path.getsize(os.path.join(args.out, f)) for f in os.listdir(args.out))
-    print("%d sprites and %d tiles, %.1f MB in %s"
-          % (len(index), len(tiles), size / 1e6, args.out))
+    print("%d sprites, %d tiles and %d item icons, %.1f MB in %s"
+          % (len(index), len(tiles), len(items), size / 1e6, args.out))
     missing = sorted(skipped - set(index))
     if missing:
         print("no sprite resolved for %d: %s" % (len(missing), ", ".join(missing[:14])))

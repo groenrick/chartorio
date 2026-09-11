@@ -27,6 +27,7 @@ require('__base__/script/freeplay/control.lua')
 --   /chartorio_tags       map tags placed in game
 --   /chartorio_resource   the total of the ore patch under a point
 --   /chartorio_entities   entities in view for the sprite layer, visible chunks
+--   /chartorio_belt_items what is moving on the belts in view
 --   /chartorio_events     which change events this build registered
 --
 -- tests/test_contract.py checks this list against what the bridge calls: an
@@ -1078,6 +1079,124 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
     truncated = truncated,
     clamped = clamped,
     scanned = scanned,
+  })
+end)
+
+-- ---------------------------------------------------------------------------
+-- Items on belts
+--
+-- The most expensive thing the map asks for, so it is gated hardest: only when
+-- the browser is zoomed in far enough to draw a quarter tile item, only in
+-- chunks the game can currently see, and over a viewport clamped smaller than
+-- the sprite layer's.
+--
+-- A transport line's detailed contents give each item a position measured
+-- along that line in tiles. A belt entity's line covers that entity alone, so
+-- the position runs from zero to the belt's length and is laid along the
+-- belt's own direction, with the two lines offset to either side of centre.
+-- ---------------------------------------------------------------------------
+
+local ITEM_LIMIT = 2000
+local ITEM_QUERY_TILES = 192
+-- A belt is one tile long and its two lines sit a quarter tile either side.
+local LINE_OFFSET = 0.25
+
+local BELT_TYPES = {
+  ["transport-belt"] = true,
+  ["underground-belt"] = true,
+  ["splitter"] = true,
+  ["linked-belt"] = true,
+  ["loader"] = true,
+  ["loader-1x1"] = true,
+}
+
+commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_belt_items <surface> <x1> <y1> <x2> <y2>.", function(command)
+  initialise()
+  local surface_name, x1, y1, x2, y2 = string.match(
+    command.parameter or "", "^(%S+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)%s+(-?%d+)$")
+  local surface = surface_name and game.surfaces[surface_name]
+  if not surface then
+    return respond({error = "usage: chartorio_belt_items <surface> <x1> <y1> <x2> <y2>"})
+  end
+  x1, y1, x2, y2 = tonumber(x1), tonumber(y1), tonumber(x2), tonumber(y2)
+
+  local center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
+  local half = ITEM_QUERY_TILES / 2
+  local clamped = (x2 - x1) > ITEM_QUERY_TILES or (y2 - y1) > ITEM_QUERY_TILES
+  if clamped then
+    x1, x2 = center_x - half, center_x + half
+    y1, y2 = center_y - half, center_y + half
+  end
+
+  local force = game.forces.player
+  local items = {}
+  local truncated = false
+  local belts = 0
+  local seen = {}
+
+  for chunk_y = math.floor(y1 / CHUNK_SIZE), math.floor(y2 / CHUNK_SIZE) do
+    for chunk_x = math.floor(x1 / CHUNK_SIZE), math.floor(x2 / CHUNK_SIZE) do
+      if force.is_chunk_visible(surface, {chunk_x, chunk_y}) then
+        local area = {
+          {math.max(x1, chunk_x * CHUNK_SIZE), math.max(y1, chunk_y * CHUNK_SIZE)},
+          {math.min(x2, chunk_x * CHUNK_SIZE + CHUNK_SIZE), math.min(y2, chunk_y * CHUNK_SIZE + CHUNK_SIZE)},
+        }
+        for _, entity in pairs(surface.find_entities_filtered({area = area})) do
+          if truncated then break end
+          local identity = entity.unit_number
+          if BELT_TYPES[entity.type] and not (identity and seen[identity]) then
+            if identity then seen[identity] = true end
+            belts = belts + 1
+            -- The whole read is wrapped: the transport line API is the part of
+            -- this that is least certain, and an uncaught error in a command
+            -- takes the server down rather than the command.
+            local ok = pcall(function()
+              local position = entity.position
+              local direction = entity.direction or 0
+              -- Sixteen directions, so a sixteenth of a turn each.
+              local angle = direction * math.pi / 8
+              local forward_x, forward_y = math.sin(angle), -math.cos(angle)
+              local side_x, side_y = -forward_y, forward_x
+
+              for index = 1, 2 do
+                local line = entity.get_transport_line(index)
+                if line then
+                  local lane = (index == 1) and 1 or -1
+                  for _, entry in pairs(line.get_detailed_contents()) do
+                    if #items >= ITEM_LIMIT then
+                      truncated = true
+                      break
+                    end
+                    -- `position` runs along the line from its start; centre it
+                    -- on the belt so a full belt reads as full.
+                    local along = (entry.position or 0.5) - 0.5
+                    local ix = position.x + forward_x * along + side_x * LINE_OFFSET * lane
+                    local iy = position.y + forward_y * along + side_y * LINE_OFFSET * lane
+                    items[#items + 1] = {
+                      n = entry.stack and entry.stack.name or nil,
+                      x = math.floor(ix * 16) / 16,
+                      y = math.floor(iy * 16) / 16,
+                    }
+                  end
+                end
+                if truncated then break end
+              end
+            end)
+            if not ok then belts = belts - 1 end
+          end
+        end
+      end
+      if truncated then break end
+    end
+    if truncated then break end
+  end
+
+  respond({
+    surface = surface.name,
+    items = items,
+    belts = belts,
+    truncated = truncated,
+    clamped = clamped,
   })
 end)
 

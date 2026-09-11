@@ -628,6 +628,9 @@ def sprite_path(name):
 
 SIGNALS = ViewportCache("/chartorio_signals", "signals", 0.5)
 ENTITIES = ViewportCache("/chartorio_entities", "entities", 1.0)
+# Items move, so a stale answer reads as a stopped factory. The shortest
+# useful cache, and the layer is off by default.
+BELT_ITEMS = ViewportCache("/chartorio_belt_items", "items", 0.25)
 INDEX = RegionCache("/chartorio_chunks", 10.0)
 POLLUTION = RegionCache("/chartorio_pollution", 20.0)
 
@@ -1043,6 +1046,10 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_resource()
         elif path == "/signals":
             self._serve_viewport(SIGNALS, "signals")
+        elif path == "/belt_items":
+            if not SPRITE_DIR:
+                return self._send_json({"items": [], "sprites": False})
+            self._serve_viewport(BELT_ITEMS, "items")
         elif path == "/raster":
             self._serve_raster()
         elif path == "/entities":
