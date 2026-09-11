@@ -1101,13 +1101,13 @@ local ITEM_QUERY_TILES = 192
 -- A belt is one tile long and its two lines sit a quarter tile either side.
 local LINE_OFFSET = 0.25
 
+-- Passed to the search itself rather than filtered afterwards. Asking for
+-- everything in the area and picking the belts out in Lua walked 934 entities
+-- to find 150, and cost 371ms a call: enough on its own to saturate the game
+-- thread and put every other call behind it.
 local BELT_TYPES = {
-  ["transport-belt"] = true,
-  ["underground-belt"] = true,
-  ["splitter"] = true,
-  ["linked-belt"] = true,
-  ["loader"] = true,
-  ["loader-1x1"] = true,
+  "transport-belt", "underground-belt", "splitter",
+  "linked-belt", "loader", "loader-1x1",
 }
 
 commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_belt_items <surface> <x1> <y1> <x2> <y2>.", function(command)
@@ -1141,10 +1141,10 @@ commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_
           {math.max(x1, chunk_x * CHUNK_SIZE), math.max(y1, chunk_y * CHUNK_SIZE)},
           {math.min(x2, chunk_x * CHUNK_SIZE + CHUNK_SIZE), math.min(y2, chunk_y * CHUNK_SIZE + CHUNK_SIZE)},
         }
-        for _, entity in pairs(surface.find_entities_filtered({area = area})) do
+        for _, entity in pairs(surface.find_entities_filtered({area = area, type = BELT_TYPES})) do
           if truncated then break end
           local identity = entity.unit_number
-          if BELT_TYPES[entity.type] and not (identity and seen[identity]) then
+          if not (identity and seen[identity]) then
             if identity then seen[identity] = true end
             belts = belts + 1
             -- The whole read is wrapped: the transport line API is the part of
@@ -1198,6 +1198,14 @@ commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_
     truncated = truncated,
     clamped = clamped,
   })
+end)
+
+-- Answers nothing, as fast as the game can. The bridge sends this after a full
+-- sized response packet: RCON answers in order, so this reply arriving means
+-- the previous answer is complete. Without it the bridge has to wait out a
+-- timeout, which put 300ms on every large response.
+commands.add_command("chartorio_marker", "Marks the end of a fragmented response.", function()
+  respond({ok = true})
 end)
 
 commands.add_command("chartorio_events", "Which change events this build registered.", function()

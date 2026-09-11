@@ -134,20 +134,34 @@ class RconClient:
         """
         request_id = self._write(EXEC_COMMAND, body)
         parts = []
+        marker_id = None
         try:
             while True:
                 try:
                     packet_id, packet_type, payload = self._read_packet()
                 except (socket.timeout, TimeoutError):
                     if parts:
-                        break
+                        break          # the marker never came; silence ends it
                     raise
-                if packet_type != RESPONSE_VALUE or packet_id != request_id:
+                if packet_type != RESPONSE_VALUE:
+                    continue
+                if marker_id is not None and packet_id == marker_id:
+                    break              # everything before this was the answer
+                if packet_id != request_id:
                     continue
                 parts.append(payload)
                 if len(payload) < 4000:
                     break
-                self.socket.settimeout(FRAGMENT_TIMEOUT)
+                if marker_id is None:
+                    # A full packet may be the first of several fragments or a
+                    # single large answer, and the protocol does not say which.
+                    # Waiting out a timeout costs 300ms on every large response
+                    # — enough to make a layer look far more expensive than it
+                    # is. Asking a second, trivial question instead is
+                    # deterministic: the server answers in order, so its reply
+                    # arriving means the first answer is complete.
+                    marker_id = self._write(EXEC_COMMAND, "/chartorio_marker")
+                    self.socket.settimeout(FRAGMENT_TIMEOUT * 4)
         finally:
             if self.socket is not None:
                 self.socket.settimeout(SOCKET_TIMEOUT)
