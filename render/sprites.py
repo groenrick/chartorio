@@ -117,6 +117,48 @@ def sprite_for(prototype):
     return None
 
 
+def all_layers(node, depth=0):
+    """Every drawable layer of a picture, in draw order, shadows skipped.
+
+    Taking only the first is not enough: an electric mining drill's animation
+    is its arms, and the chunky body it sits in is a separate layer. One layer
+    drew the arms alone, which is not recognisably a drill."""
+    if depth > 6 or node is None:
+        return []
+    if isinstance(node, list):
+        out = []
+        for item in node:
+            out.extend(all_layers(item, depth + 1))
+        return out
+    if not isinstance(node, dict):
+        return []
+    if node.get("draw_as_shadow") or node.get("draw_as_glow") or node.get("draw_as_light"):
+        return []
+    if node.get("layers"):
+        return all_layers(node["layers"], depth + 1)
+    info = layer_info(node)
+    return [info] if info else []
+
+
+def working_layers(prototype, direction_name):
+    """A prototype's working visualisations, matched to a direction. This is
+    where the drill keeps its body, and where a furnace keeps its fire."""
+    entries = (prototype.get("graphics_set") or {}).get("working_visualisations")
+    if not isinstance(entries, list):
+        return []
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        node = entry.get(direction_name + "_animation") or entry.get("animation")
+        out.extend(all_layers(node))
+    # Smoke, light and glow are drawn every frame in game and read as noise on
+    # a map that cannot animate them. Filtered on the resolved layers, because
+    # the filename sits below a `layers` list rather than on the entry.
+    return [layer for layer in out
+            if not any(word in layer["filename"] for word in ("smoke", "-light", "glow", "shadow"))]
+
+
 def layer_info(node):
     """One drawable layer, normalised. None when the node is not one."""
     if not isinstance(node, dict) or not node.get("filename"):
@@ -200,9 +242,9 @@ def directional_layers(prototype):
             return None
         found = {}
         for key, direction in DIRECTION_KEYS.items():
-            layer = layer_info(first_layer(node[key]))
-            if layer:
-                found[direction] = [layer]
+            layers = all_layers(node[key]) + working_layers(prototype, key)
+            if layers:
+                found[direction] = layers
         return found or None
 
     for path in DIRECTIONAL_PATHS:
@@ -465,11 +507,25 @@ def main():
                     entry = {"kind": "directional", "by": by}
             else:
                 layer = sprite_for(prototype)
-                info = layer_info(layer) if layer else None
-                served = take(info) if info else None
+                infos = []
+                if layer:
+                    if layer.get("chartorio_kind") == "belt":
+                        # A belt sheet is one grid; compositing it makes no sense.
+                        infos = [layer_info(layer)]
+                    else:
+                        for path in PICTURE_PATHS:
+                            found = all_layers(dig(prototype, path))
+                            if found:
+                                infos = found + working_layers(prototype, "north")
+                                break
+                        if not infos:
+                            infos = [layer_info(layer)]
+                infos = [i for i in infos if i]
+                served = [take(i) for i in infos]
+                served = [s for s in served if s]
                 if served:
                     entry = {"kind": layer.get("chartorio_kind", "static"),
-                             "layers": [served]}
+                             "layers": served}
                     if entry["kind"] == "belt":
                         # Frames advance with the belt's own speed, so a fast
                         # belt visibly runs faster than a yellow one.
