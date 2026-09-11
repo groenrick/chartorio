@@ -1561,7 +1561,7 @@ function renderPanel() {
     item.innerHTML = `<span class="swatch" style="background:${toCss(player.color)}"></span>`
       + `<span class="name"></span><span class="meta">${Math.round(player.x)}, ${Math.round(player.y)}</span>`;
     item.querySelector(".name").textContent = player.name;
-    item.onclick = () => { follow = { kind: "player", id: player.name }; followTarget(); renderPanel(); requestDraw(); };
+    item.onclick = () => { follow = { kind: "player", id: player.name }; followTarget(); renderPanel(); writeView(); requestDraw(); };
     players.appendChild(item);
   }
 
@@ -1575,7 +1575,7 @@ function renderPanel() {
       + `<span class="name"></span>`
       + `<span class="meta">${Math.abs(Math.round((train.speed || 0) * 216))} km/h</span>`;
     item.querySelector(".name").textContent = `#${train.id} ${train.destination || train.state}`;
-    item.onclick = () => { follow = { kind: "train", id: train.id }; followTarget(); renderPanel(); requestDraw(); };
+    item.onclick = () => { follow = { kind: "train", id: train.id }; followTarget(); renderPanel(); writeView(); requestDraw(); };
     trains.appendChild(item);
   }
 
@@ -1626,6 +1626,7 @@ function viewportBox() {
 
 function sendViewport(immediate = false) {
   if (viewportTimer) clearTimeout(viewportTimer);
+  writeView();
   const send = () => {
     requestSprites();
     const box = viewportBox();
@@ -1824,7 +1825,7 @@ window.addEventListener("keydown", (event) => {
   if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
 
   const key = event.key.toLowerCase();
-  if (key === "escape") { follow = null; setActiveLegendRow(null); renderPanel(); return; }
+  if (key === "escape") { follow = null; setActiveLegendRow(null); renderPanel(); writeView(); return; }
   if (key === "shift" || PAN_KEYS[key]) {
     if (PAN_KEYS[key]) event.preventDefault();
     held.add(key);
@@ -1983,6 +1984,7 @@ for (const name of Object.keys(layers)) {
   input.addEventListener("change", () => {
     layers[name] = input.checked;
     sendViewport(true);
+    writeView();
     if (highlight && !layers[{ color: "terrain", units: "biters", players: "players", trains: "trains",
                                tags: "tags", alerts: "alerts", signals: "signals" }[highlight.highlight]]) {
       highlight = null;
@@ -2131,10 +2133,134 @@ function connect() {
   socket.onerror = () => { if (socket) socket.close(); };
 }
 
+
+// ---------------------------------------------------------------------------
+// The view in the URL
+//
+// A hash rather than a query string: this is pure client state, the bridge has
+// no use for it, and a fragment is never sent to the server — so it stays out
+// of request logs and every shared link is the same URL to any cache between.
+//
+//   #1/-12.5/40.25/2/f3/nauvis/p:rikkert996
+//    │  │     │     │  │  │     └ follow, optional
+//    │  │     │     │  │  └ surface, optional
+//    │  │     │     │  └ layers, a base36 bitmask
+//    │  │     │     └ scale
+//    │  └─────┴ position
+//    └ format version, so an old link can be recognised rather than misread
+//
+// Trailing fields are optional, so the common link stays short. Bit order is a
+// compatibility promise: a ninth layer appends, and must never shift what the
+// first eight mean.
+// ---------------------------------------------------------------------------
+const URL_VERSION = "1";
+const LAYER_BITS = ["terrain", "biters", "trains", "players",
+                    "pollution", "tags", "alerts", "signals"];
+let urlTimer = null;
+
+// Six decimals of world position mean nothing at 0.05 pixels to a tile. Round
+// to what the current zoom can actually distinguish, which keeps a link short
+// exactly when it would otherwise be longest.
+function viewPrecision(scale) {
+  return Math.min(3, Math.max(0, Math.ceil(Math.log10(Math.max(scale, 0.01)))));
+}
+
+function encodeView() {
+  const digits = viewPrecision(view.scale);
+  let mask = 0;
+  LAYER_BITS.forEach((name, bit) => { if (layers[name]) mask |= 1 << bit; });
+  const parts = [
+    URL_VERSION,
+    // Number() drops the trailing zeros toFixed leaves behind, so the common
+    // case reads 0/0 rather than 0.0/0.0.
+    Number(view.x.toFixed(digits)),
+    Number(view.y.toFixed(digits)),
+    Number(view.scale.toPrecision(3)),
+    mask.toString(36),
+  ];
+  // Only spelled out when it is not the default, so a plain link stays short.
+  const followed = follow ? (follow.kind === "player" ? "p:" : "t:") + follow.id : "";
+  if (followed || SURFACE !== "nauvis") parts.push(SURFACE);
+  if (followed) parts.push(followed);
+  return "#" + parts.join("/");
+}
+
+function writeView() {
+  if (urlTimer) clearTimeout(urlTimer);
+  // replaceState, never pushState: panning must not fill the back button with
+  // hundreds of entries.
+  urlTimer = setTimeout(() => {
+    try { history.replaceState(null, "", encodeView()); } catch (error) { /* file:// */ }
+  }, 250);
+}
+
+// Returns what the hash asked for, or null. A hand mangled link must land on
+// the default view rather than a blank page, so anything unparseable is
+// nothing rather than an error.
+function decodeView(hash) {
+  const raw = (hash || "").replace(/^#/, "");
+  if (!raw) return null;
+  const parts = raw.split("/");
+  if (parts.shift() !== URL_VERSION) return null;
+  const [x, y, scale, mask, , followed] = parts;
+  const out = {};
+  if (Number.isFinite(Number(x)) && x !== "" && Number.isFinite(Number(y)) && y !== "") {
+    out.x = Number(x);
+    out.y = Number(y);
+  }
+  const asked = Number(scale);
+  if (Number.isFinite(asked) && asked > 0) {
+    // A link asking for more than the map allows is clamped, not honoured.
+    out.scale = Math.min(24, Math.max(0.05, asked));
+  }
+  if (mask !== undefined && /^[0-9a-z]+$/.test(mask)) {
+    const bits = parseInt(mask, 36);
+    if (Number.isFinite(bits)) {
+      out.layers = {};
+      LAYER_BITS.forEach((name, bit) => { out.layers[name] = Boolean(bits & (1 << bit)); });
+    }
+  }
+  if (followed) {
+    const kind = followed.startsWith("p:") ? "player" : followed.startsWith("t:") ? "train" : null;
+    if (kind) {
+      const id = followed.slice(2);
+      if (id) out.follow = { kind, id: kind === "train" ? Number(id) : id };
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function applyView(asked) {
+  if (!asked) return false;
+  if (asked.x !== undefined) { view.x = asked.x; view.y = asked.y; }
+  if (asked.scale !== undefined) view.scale = asked.scale;
+  if (asked.layers) {
+    // An absent mask means the defaults, not everything off — pollution starts
+    // off, so the two are genuinely different states.
+    for (const name of LAYER_BITS) layers[name] = asked.layers[name];
+    for (const name of Object.keys(layers)) {
+      const input = document.getElementById("layer-" + name);
+      if (input) input.checked = layers[name];
+    }
+  }
+  // A link that follows somebody who has since logged off cannot follow
+  // anything, and falls back to the position encoded beside it.
+  if (asked.follow) follow = asked.follow;
+  return true;
+}
+
+// Read once before the first draw, so the map does not visibly jump from the
+// origin to wherever the link asked for.
+applyView(decodeView(location.hash));
+window.addEventListener("hashchange", () => {
+  if (applyView(decodeView(location.hash))) { sendViewport(true); renderPanel(); requestDraw(); }
+});
+
 connect();
 
 resize();
 renderPanel();
+writeView();
 </script>
 </body>
 </html>
