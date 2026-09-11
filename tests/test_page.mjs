@@ -445,6 +445,24 @@ test("below the sprite threshold the colour tile always stands", () => {
   assert.equal(page.terrainCovers(3, 4), false);
 });
 
+test("an entity with no sprite still has something drawn for it", () => {
+  // The terrain layer paints over the colour map, so anything the extract has
+  // never seen would otherwise vanish. A radar built after the extract was
+  // taken is the case that found this.
+  const page = boot();
+  const meta = { kind: "none", tiles: [3, 3] };
+  // Length rather than deepEqual: an array built inside the vm context has
+  // that context's prototype, which deepStrictEqual rejects.
+  assert.equal(page.spriteLayers(meta, {}).length, 0,
+               "kind none has no layers, so the caller must fall back");
+});
+
+test("a sprited prototype still reports its footprint", () => {
+  const page = boot();
+  const meta = { kind: "static", layers: [{ file: "a.png" }], tiles: [2, 2] };
+  assert.equal(page.spriteLayers(meta, {}).length, 1, "art wins over the fallback");
+});
+
 test("ore totals read the way the game writes them", () => {
   const page = boot();
   assert.equal(page.formatAmount(950), "950");

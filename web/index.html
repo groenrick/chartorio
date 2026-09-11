@@ -1371,6 +1371,23 @@ function drawTerrainSprites() {
   }
 }
 
+// Anything with no extracted sprite still has to be drawn, or it vanishes: the
+// terrain layer paints over the colour map, so the block that used to stand in
+// for it is gone. An extract is a snapshot of the prototypes a world had when
+// it was taken, and a radar built afterwards must not make the radar
+// invisible. Fall back to the palette colour the map has always used, over the
+// footprint the prototype actually covers.
+function drawUnsprited(entity, meta) {
+  const colour = palette["e:" + entity.n] || palette["x:" + entity.n];
+  if (!colour) return;
+  const tiles = (meta && meta.tiles) || [1, 1];
+  const width = tiles[0] * view.scale;
+  const height = tiles[1] * view.scale;
+  const centre = worldToScreen(entity.x, entity.y);
+  context.fillStyle = toCss(colour);
+  context.fillRect(centre.x - width / 2, centre.y - height / 2, width, height);
+}
+
 function drawSprites() {
   if (!spritesWanted() || !spriteIndex) return;
   const now = performance.now() / 1000;
@@ -1379,8 +1396,12 @@ function drawSprites() {
   const ordered = spriteEntities.slice().sort((a, b) => a.y - b.y);
   for (const entity of ordered) {
     const meta = spriteIndex[entity.n];
-    if (!meta) continue;                       // no art: the colour tile stands
-    for (const layer of spriteLayers(meta, entity)) {
+    const layers = meta ? spriteLayers(meta, entity) : [];
+    if (!layers.length) {
+      drawUnsprited(entity, meta);
+      continue;
+    }
+    for (const layer of layers) {
       drawOneLayer(layer, entity, meta, now);
     }
   }
