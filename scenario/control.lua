@@ -972,6 +972,11 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
   local entities = {}
   local truncated = false
   local scanned = 0
+  -- Searched per chunk, so anything standing across a chunk boundary comes
+  -- back once for every chunk it touches. A three by three drill was being
+  -- sent up to four times, drawn on top of itself, and counted four times
+  -- against the limit, which pushed real entities out of the answer.
+  local seen = {}
 
   for chunk_y = math.floor(y1 / CHUNK_SIZE), math.floor(y2 / CHUNK_SIZE) do
     for chunk_x = math.floor(x1 / CHUNK_SIZE), math.floor(x2 / CHUNK_SIZE) do
@@ -992,7 +997,10 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
           -- faster poll; drawing it here as well would show it twice, a few
           -- hundred milliseconds apart.
           local kind = entity.type
-          if kind ~= "character" and kind ~= "unit" and kind ~= "car"
+          local identity = entity.unit_number
+          if identity and seen[identity] then
+            -- already sent from a neighbouring chunk
+          elseif kind ~= "character" and kind ~= "unit" and kind ~= "car"
              and kind ~= "locomotive" and kind ~= "cargo-wagon"
              and kind ~= "fluid-wagon" and kind ~= "artillery-wagon"
              and kind ~= "item-entity" and kind ~= "particle-source" then
@@ -1054,6 +1062,7 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
               if linked and mask then record.c = mask end
             end
 
+            if identity then seen[identity] = true end
             entities[#entities + 1] = record
           end
         end
