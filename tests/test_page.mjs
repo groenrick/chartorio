@@ -115,7 +115,8 @@ function boot() {
   // handed out by an epilogue running in the same scope.
   const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES, layers,"
               + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers, spriteCell, spriteKey,"
-              + " expandRuns, tileVariant, terrainKey, terrainCovers,"
+              + " expandRuns, tileVariant, terrainKey, terrainCovers, spriteDepth,"
+              + " __setSpriteIndex(v) { spriteIndex = v; },"
               + " __setTerrain(x, y, rev) { terrainCache.set(terrainKey(x, y), { revision: rev, canvas: {} }); },"
               + " __setCharted(x, y, rev) { charted.set(key(x, y), rev); },"
               + " __setSpritesAvailable(v) { spritesAvailable = v; },"
@@ -461,6 +462,38 @@ test("a sprited prototype still reports its footprint", () => {
   const page = boot();
   const meta = { kind: "static", layers: [{ file: "a.png" }], tiles: [2, 2] };
   assert.equal(page.spriteLayers(meta, {}).length, 1, "art wins over the fallback");
+});
+
+test("ore is painted under the things built on top of it", () => {
+  // A belt across a coal patch disappeared beneath the coal.
+  const page = boot();
+  page.__setSpriteIndex({
+    coal: { kind: "ore", category: "resource" },
+    "transport-belt": { kind: "belt", category: "transport-belt" },
+  });
+  assert.equal(page.spriteDepth({ n: "coal" }), 0, "ore is ground");
+  assert.equal(page.spriteDepth({ n: "transport-belt" }), 1, "a belt is built on it");
+  assert.ok(page.spriteDepth({ n: "coal" }) < page.spriteDepth({ n: "transport-belt" }));
+});
+
+test("an unknown prototype is painted with the built things, not the ground", () => {
+  // Better a radar over some ore than a radar hidden under it.
+  const page = boot();
+  page.__setSpriteIndex({});
+  assert.equal(page.spriteDepth({ n: "whatever" }), 1);
+});
+
+test("depth beats position, so a belt on ore stays visible", () => {
+  const page = boot();
+  page.__setSpriteIndex({
+    coal: { kind: "ore", category: "resource" },
+    "transport-belt": { kind: "belt", category: "transport-belt" },
+  });
+  // The belt is further north, so sorting by y alone would put it underneath.
+  const belt = { n: "transport-belt", y: -10 };
+  const ore = { n: "coal", y: 10 };
+  const ordered = [belt, ore].sort((a, b) => page.spriteDepth(a) - page.spriteDepth(b) || a.y - b.y);
+  assert.equal(ordered[0].n, "coal", "ore must be drawn first");
 });
 
 test("ore totals read the way the game writes them", () => {

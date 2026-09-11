@@ -1289,6 +1289,24 @@ function buildTerrainChunk(chunkX, chunkY, payload) {
     if (count > best) { best = count; common = name; }
   }
 
+  // The chunk's commonest tile alone leaves a visible square of the wrong
+  // ground wherever a forest sits on mixed terrain, so a hole takes its
+  // nearest neighbour's tile and only falls back to the commonest one.
+  const nearestName = (cellX, cellY) => {
+    for (let radius = 1; radius <= 4; radius++) {
+      for (const [dx, dy] of [[-radius, 0], [radius, 0], [0, -radius], [0, radius],
+                              [-radius, -radius], [radius, radius],
+                              [-radius, radius], [radius, -radius]]) {
+        const x = cellX + dx;
+        const y = cellY + dy;
+        if (x < 0 || y < 0 || x >= size || y >= size) continue;
+        const near = payload.names[indices[y * size + x]];
+        if (near) return near;
+      }
+    }
+    return common;
+  };
+
   const canvas = document.createElement("canvas");
   canvas.width = CHUNK_TILES * TERRAIN_CACHE_PX;
   canvas.height = CHUNK_TILES * TERRAIN_CACHE_PX;
@@ -1297,8 +1315,9 @@ function buildTerrainChunk(chunkX, chunkY, payload) {
   for (let ty = 0; ty < CHUNK_TILES; ty++) {
     for (let tx = 0; tx < CHUNK_TILES; tx++) {
       // Sample the middle of the tile: the raster is finer than one cell a tile.
-      const cell = Math.floor(ty * step) * size + Math.floor(tx * step);
-      const name = payload.names[indices[cell]] || common;
+      const cellX = Math.floor(tx * step);
+      const cellY = Math.floor(ty * step);
+      const name = payload.names[indices[cellY * size + cellX]] || nearestName(cellX, cellY);
       if (!name) continue;
       const meta = tileIndex[name.slice(2)];   // drop the "t:" prefix
       if (!meta) continue;
@@ -1377,6 +1396,18 @@ function drawTerrainSprites() {
 // it was taken, and a radar built afterwards must not make the radar
 // invisible. Fall back to the palette colour the map has always used, over the
 // footprint the prototype actually covers.
+// Which band an entity is painted in. Factorio has a long list of render
+// layers; two is enough here to stop a belt vanishing under the ore it runs
+// across.
+const GROUND_CATEGORIES = new Set(["resource", "tile", "decorative", "corpse",
+                                   "cliff", "simple-entity"]);
+
+function spriteDepth(entity) {
+  const meta = spriteIndex[entity.n];
+  if (!meta) return 1;
+  return GROUND_CATEGORIES.has(meta.category) ? 0 : 1;
+}
+
 function drawUnsprited(entity, meta) {
   const colour = palette["e:" + entity.n] || palette["x:" + entity.n];
   if (!colour) return;
@@ -1391,9 +1422,12 @@ function drawUnsprited(entity, meta) {
 function drawSprites() {
   if (!spritesWanted() || !spriteIndex) return;
   const now = performance.now() / 1000;
-  // Painted back to front, so a tree's leaves land over its own trunk and a
-  // building to the south overlaps the one behind it the way the game draws it.
-  const ordered = spriteEntities.slice().sort((a, b) => a.y - b.y);
+  // Ore and other ground cover are painted under everything built on top of
+  // them, or a belt across a coal patch disappears beneath the coal. Within a
+  // band it is back to front, so a tree's leaves land over its own trunk and a
+  // building to the south overlaps the one behind it, the way the game draws.
+  const ordered = spriteEntities.slice().sort(
+    (a, b) => spriteDepth(a) - spriteDepth(b) || a.y - b.y);
   for (const entity of ordered) {
     const meta = spriteIndex[entity.n];
     const layers = meta ? spriteLayers(meta, entity) : [];
