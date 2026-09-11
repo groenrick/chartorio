@@ -171,10 +171,45 @@ PIPE_BY_MASK = {
 }
 
 
+# Where a direction table is worth looking, in order. A blind search finds the
+# wrong one: an electric mining drill carries pipe_covers, which is also keyed
+# north/east/south/west, and picking that drew every drill as a small round
+# pipe cover sitting on the ore.
+DIRECTIONAL_PATHS = [
+    ("graphics_set", "animation"),
+    ("graphics_set", "picture"),
+    ("graphics_set", "structure"),
+    ("animation",),
+    ("structure",),
+    ("pictures",),
+    ("picture",),
+    ("sprites",),
+]
+
+# Never a prototype's own picture, however it is keyed.
+NOT_GRAPHICS = ("pipe_covers", "circuit_connector", "fluid_box", "energy_source",
+                "connection_sprites", "wire_connection", "pipe_connection")
+
+
 def directional_layers(prototype):
-    """A table keyed north/east/south/west, wherever it is buried. Descending
-    into `north` and stopping — which is what happened at first — draws every
-    splitter, drill, boiler and pump facing north."""
+    """A table keyed north/east/south/west. Descending into `north` and
+    stopping — which is what happened at first — draws every splitter, drill,
+    boiler and pump facing north."""
+    def collect(node):
+        if not isinstance(node, dict) or not set(DIRECTION_KEYS) <= set(node):
+            return None
+        found = {}
+        for key, direction in DIRECTION_KEYS.items():
+            layer = layer_info(first_layer(node[key]))
+            if layer:
+                found[direction] = [layer]
+        return found or None
+
+    for path in DIRECTIONAL_PATHS:
+        found = collect(dig(prototype, path))
+        if found:
+            return found
+
     def walk(node, depth=0):
         if depth > 5 or not isinstance(node, dict):
             return None
@@ -185,7 +220,9 @@ def directional_layers(prototype):
                 if layer:
                     found[direction] = [layer]
             return found or None
-        for value in node.values():
+        for name, value in node.items():
+            if any(skip in name for skip in NOT_GRAPHICS):
+                continue
             deeper = walk(value, depth + 1)
             if deeper:
                 return deeper
