@@ -998,9 +998,9 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
           -- hundred milliseconds apart.
           local kind = entity.type
           local identity = entity.unit_number
-          if identity and seen[identity] then
-            -- already sent from a neighbouring chunk
-          elseif kind ~= "character" and kind ~= "unit" and kind ~= "car"
+          local already = identity ~= nil and seen[identity] ~= nil
+          if not already
+             and kind ~= "character" and kind ~= "unit" and kind ~= "car"
              and kind ~= "locomotive" and kind ~= "cargo-wagon"
              and kind ~= "fluid-wagon" and kind ~= "artillery-wagon"
              and kind ~= "item-entity" and kind ~= "particle-source" then
