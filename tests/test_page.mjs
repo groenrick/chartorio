@@ -118,6 +118,7 @@ function boot() {
               + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers, spriteCell, spriteKey,"
               + " expandRuns, tileVariant, terrainKey, terrainCovers, spriteDepth,"
               + " encodeView, decodeView, applyView, viewPrecision, LAYER_BITS,"
+              + " itemsWanted, __setItemIndex(v) { itemIndex = v; },"
               + " get follow() { return follow; }, set follow(v) { follow = v; },"
               + " __setSpriteIndex(v) { spriteIndex = v; },"
               + " __setTerrain(x, y, rev) { terrainCache.set(terrainKey(x, y), { revision: rev, canvas: {} }); },"
@@ -585,6 +586,52 @@ test("a followed train id comes back as a number", () => {
   assert.equal(page.follow.kind, "train");
   assert.equal(page.follow.id, 12);
   assert.equal(typeof page.follow.id, "number");
+});
+
+test("items on belts stay off until well past the sprite threshold", () => {
+  // An item is a quarter of a tile; at the sprite threshold it is noise.
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.__setItemIndex({ coal: { file: "coal.png", size: 64 } });
+  page.layers.items = true;
+  page.view.scale = 8;
+  assert.equal(page.itemsWanted(), false, "8 px a tile is the sprite threshold, too far for items");
+  page.view.scale = 16;
+  assert.equal(page.itemsWanted(), true);
+});
+
+test("items are off unless the layer is switched on", () => {
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.__setItemIndex({ coal: { file: "coal.png", size: 64 } });
+  page.view.scale = 24;
+  page.layers.items = false;
+  assert.equal(page.itemsWanted(), false, "the layer defaults off and must stay off");
+});
+
+test("items need an icon index, not just the layer", () => {
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.__setItemIndex(null);
+  page.layers.items = true;
+  page.view.scale = 24;
+  assert.equal(page.itemsWanted(), false, "no icons extracted means nothing to draw");
+});
+
+test("the items layer appends to the bitmask without shifting the others", () => {
+  // Bit order is a promise to every link already shared.
+  const page = boot();
+  assert.equal(page.LAYER_BITS[0], "terrain");
+  assert.equal(page.LAYER_BITS[7], "signals");
+  assert.equal(page.LAYER_BITS[8], "items", "a ninth layer appends, never inserts");
+});
+
+test("an old link without the items bit leaves the layer off", () => {
+  const page = boot();
+  page.layers.items = true;
+  // "6n" is an eight bit mask from before the items layer existed.
+  page.applyView(page.decodeView("#1/0/0/2/6n"));
+  assert.equal(page.layers.items, false, "a link that predates the layer must not switch it on");
 });
 
 test("ore totals read the way the game writes them", () => {

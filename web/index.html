@@ -180,6 +180,7 @@
       <label class="toggle"><input type="checkbox" id="layer-tags" checked> map tags <span class="meta" id="tag-count">0</span></label>
       <label class="toggle"><input type="checkbox" id="layer-signals" checked> rail signals <span class="meta" id="signal-count">0</span></label>
       <label class="toggle"><input type="checkbox" id="layer-alerts" checked> alerts</label>
+      <label class="toggle"><input type="checkbox" id="layer-items"> items on belts <span class="meta" id="item-count">0</span></label>
       <label class="toggle"><input type="checkbox" id="layer-pollution"> pollution</label>
       <div class="note">Nests sit in the terrain layer, so they stay visible once charted. Moving biters need current radar or player vision, exactly like the in-game map.</div>
     </section>
@@ -265,6 +266,8 @@ const MAX_ZOOM = 3;
 const layers = {
   terrain: true, biters: true, trains: true, players: true,
   pollution: false, tags: true, alerts: true, signals: true,
+  // Off by default: it is the most expensive thing the map can ask for.
+  items: false,
 };
 let signals = [];
 const SIGNAL_MIN_SCALE = 0.9;   // below this they are pinpricks and just clutter
@@ -1054,6 +1057,7 @@ async function loadSpriteIndex() {
     spritesAvailable = Boolean(payload.available);
     spriteIndex = payload.sprites || {};
     tileIndex = payload.tiles || {};
+    itemIndex = payload.items || {};
     if (payload.min_scale) spriteMinScale = payload.min_scale;
   } catch (error) {
     spritesAvailable = false;
@@ -1419,6 +1423,73 @@ function drawUnsprited(entity, meta) {
   context.fillRect(centre.x - width / 2, centre.y - height / 2, width, height);
 }
 
+
+// ---------------------------------------------------------------------------
+// Items on belts
+//
+// The most expensive thing the map asks for, so it is off by default and drawn
+// only well past the sprite threshold: an item is a quarter of a tile and is
+// noise until the view is close in. Drawn over the belts, which is where the
+// game puts them.
+// ---------------------------------------------------------------------------
+const ITEM_MIN_SCALE = 16;       // screen pixels to a world tile
+const ITEM_TILES = 0.3;          // how much of a tile an item covers
+let itemIndex = null;            // item name -> {file, size}
+let beltItems = [];
+let itemRequest = null;
+
+function itemsWanted() {
+  return Boolean(spritesAvailable && layers.items && itemIndex
+                 && view.scale >= ITEM_MIN_SCALE);
+}
+
+function requestBeltItems(refresh = false) {
+  if (!itemsWanted()) {
+    if (beltItems.length) { beltItems = []; requestDraw(); }
+    return;
+  }
+  const box = viewportBox();
+  const key = `${box.x1},${box.y1},${box.x2},${box.y2}`;
+  // The same viewport is asked again on the refresh tick, because unlike every
+  // other layer the answer changes even when the view does not.
+  if (!refresh && itemRequest === key) return;
+  itemRequest = key;
+  const query = new URLSearchParams({ surface: SURFACE, x1: box.x1, y1: box.y1, x2: box.x2, y2: box.y2 });
+  fetch("/belt_items?" + query)
+    .then((response) => response.json())
+    .then((payload) => {
+      beltItems = Array.isArray(payload.items) ? payload.items : [];
+      const counter = document.getElementById("item-count");
+      if (counter) counter.textContent = beltItems.length;
+      requestDraw();
+    })
+    .catch(() => {});
+}
+
+// Items move, so the layer polls on its own rather than only when the view
+// changes. Nothing is asked for while the layer is off or the view is too far
+// out, so this costs nothing until somebody wants it.
+setInterval(() => { if (itemsWanted()) requestBeltItems(true); }, 300);
+
+function drawBeltItems() {
+  if (!itemsWanted()) return;
+  const size = ITEM_TILES * view.scale;
+  for (const item of beltItems) {
+    const meta = itemIndex[item.n];
+    if (!meta) continue;
+    const image = spriteImage(meta.file);
+    if (!image.complete || image.failed || !image.naturalWidth) continue;
+    const screen = worldToScreen(item.x, item.y);
+    try {
+      // Only the leftmost square: an icon file carries its mipmaps beside it.
+      context.drawImage(image, 0, 0, meta.size, meta.size,
+                        screen.x - size / 2, screen.y - size / 2, size, size);
+    } catch (error) {
+      image.failed = true;
+    }
+  }
+}
+
 function drawSprites() {
   if (!spritesWanted() || !spriteIndex) return;
   const now = performance.now() / 1000;
@@ -1457,6 +1528,7 @@ function draw() {
 
   drawTerrainSprites();
   drawSprites();
+  drawBeltItems();
   if (layers.pollution) drawPollution();
   drawGrid();
   if (layers.biters) drawUnits();
@@ -1629,6 +1701,7 @@ function sendViewport(immediate = false) {
   writeView();
   const send = () => {
     requestSprites();
+    requestBeltItems();
     const box = viewportBox();
     if (transport === "websocket") {
       if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -2155,7 +2228,10 @@ function connect() {
 // ---------------------------------------------------------------------------
 const URL_VERSION = "1";
 const LAYER_BITS = ["terrain", "biters", "trains", "players",
-                    "pollution", "tags", "alerts", "signals"];
+                    "pollution", "tags", "alerts", "signals",
+                    // Appended. Never reorder: the bit positions are a promise
+                    // to every link already shared.
+                    "items"];
 let urlTimer = null;
 
 // Six decimals of world position mean nothing at 0.05 pixels to a tile. Round
