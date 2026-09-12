@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import urllib.request
 
+
 # Where a prototype hides its main picture. Tried in order; the first that
 # resolves to a real layer wins. Factorio has no single field for this because
 # a belt, a furnace and a pole are drawn by quite different machinery.

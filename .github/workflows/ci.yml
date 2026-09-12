@@ -27,7 +27,29 @@ jobs:
         run: node --test tests/*.mjs
 
       - name: Everything compiles
-        run: python -m compileall -q bridge tools tests
+        run: python -m compileall -q bridge tools tests render
+
+      # The real inputs are Wube's artwork: it cannot be committed, and a
+      # GitHub runner has neither Factorio nor a licence. So the build is
+      # proved against a synthetic extract the tests generate — same index
+      # shapes, sheets written by the project's own PNG writer — which
+      # exercises the whole pipeline without the game.
+      - name: The sprite build runs end to end
+        run: |
+          python - <<'PY'
+          import sys, tempfile, os
+          sys.path.insert(0, "tests")
+          from test_build import Extract, build
+          root = tempfile.mkdtemp()
+          source, target = os.path.join(root, "extract"), os.path.join(root, "built")
+          Extract(source)
+          record = build.build(source, target)
+          checked, problems = build.verify(source, target)
+          assert not problems, problems
+          assert record["bytes_out"] < record["bytes_in"]
+          print("built %d files, verified %d crops, %d -> %d bytes"
+                % (len(record["files"]), checked, record["bytes_in"], record["bytes_out"]))
+          PY
 
   scenario:
     runs-on: ubuntu-latest
