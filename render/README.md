@@ -106,3 +106,49 @@ Two known limits:
 Tile variants are picked by a position hash rather than Factorio's own, which
 it does not publish, so ground looks right but will not match the game tile for
 tile.
+
+## Building an extract for shipping
+
+`sprites.py` copies the game's files out unchanged, so an extract can be diffed
+against the install it came from and nothing is silently transformed. Those
+files are sized for a game engine, not a map: most of what they hold is never
+drawn.
+
+```bash
+python3 render/build.py --in /srv/chartorio-sprites --out /srv/chartorio-built --verify
+```
+
+Measured on the live world's 115 prototypes:
+
+| | |
+| --- | --- |
+| extract | 160.1 MB |
+| built | **47.8 MB** |
+| | 724 cropped, 16 kept whole, 3.3x |
+
+The build never writes to the input, rebuilds its output from scratch, and
+records what it did in `build.json` — settings, byte counts, and a SHA-256 of
+every source file, so a built directory can say where it came from and refuse
+to be built twice.
+
+**`--verify` is the point of it, not the size.** Every cropped sprite is decoded
+and compared against the same rectangle of its source, because smaller is
+worthless if it draws the wrong thing, and every sprite fault this project has
+had was a silent one. It also catches the extract changing underneath a build.
+
+### What is left whole, deliberately
+
+Belts, ore and underground belts address a grid at draw time — sixteen frames
+across twenty orientations, eight richness stages by eight variations, four
+directions side by side — so cropping breaks them. They are excluded by kind.
+
+Eighteen files in the live extract are palette or greyscale PNGs, which
+`png.py` refuses rather than guessing at. They are copied whole and cost 0.24 MB
+of the 47.8 MB build, so supporting them is not worth the risk of decoding them
+wrongly.
+
+### Why this is not part of extraction
+
+Extraction should be checkable against the game. Trading bytes is a separate
+decision, rerunnable with different settings without extracting again, and it
+is where a quality-for-size trade such as downscaling would belong.

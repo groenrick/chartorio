@@ -22,11 +22,8 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import png  # noqa: E402
 
 # Where a prototype hides its main picture. Tried in order; the first that
 # resolves to a real layer wins. Factorio has no single field for this because
@@ -429,48 +426,6 @@ def item_icon(prototype):
     return {"filename": filename, "size": size or 64}
 
 
-# These address a grid at draw time — belts step through sixteen frames across
-# twenty orientations, ore across richness by variation, underground belts
-# offset by direction — so their sheets have to stay whole.
-UNCROPPABLE = {"belt", "ore", "underground"}
-
-
-def crop_layers(out_dir, entry, sources):
-    """Cut each layer down to the cell it is drawn from.
-
-    Most of an extract is sheet nobody looks at: a static entity is drawn from
-    frame zero while the other thirty-one are copied for nothing. Cropping
-    rewrites the layer's offset to the new origin, which is the part that must
-    not be got wrong — a sprite cropped correctly but still addressed at its old
-    offset draws from somewhere else entirely.
-    """
-    if entry.get("kind") in UNCROPPABLE:
-        return 0
-    saved = 0
-    groups = list((entry.get("by") or {}).values()) or [entry.get("layers") or []]
-    for group in groups:
-        for layer in group:
-            source = sources.get(layer["file"])
-            if not source or layer.get("cropped"):
-                continue
-            target = os.path.join(out_dir, layer["file"])
-            try:
-                with open(target, "rb") as handle:
-                    data = handle.read()
-                before = len(data)
-                cut = png.crop(data, layer.get("x", 0), layer.get("y", 0),
-                               layer["width"], layer["height"])
-            except (png.UnsupportedPNG, OSError):
-                continue          # anything not confidently croppable stays whole
-            with open(target, "wb") as handle:
-                handle.write(cut)
-            layer["x"] = 0
-            layer["y"] = 0
-            layer["cropped"] = True
-            saved += before - len(cut)
-    return saved
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -479,10 +434,6 @@ def main():
     parser.add_argument("--config", required=True, help="config.ini with a private write-data")
     parser.add_argument("--mods", required=True)
     parser.add_argument("--data-dir", default=None, help="the game's data directory")
-    parser.add_argument("--crop", action="store_true",
-                        help="cut each sheet down to the cell it is drawn from; "
-                             "off by default, so an extract is the game's files "
-                             "unchanged and easy to check against them")
     parser.add_argument("--only-from-map", default=None,
                         help="a running bridge, so only prototypes this world has are extracted")
     args = parser.parse_args()
@@ -667,73 +618,9 @@ def main():
                 copied[source] = target
             items[name] = {"file": copied[source], "size": info["size"]}
 
-    # Cropping happens last, when every layer's offset is settled. A file
-    # shared by two prototypes is cropped once, by whichever reaches it first,
-    # and the second is left alone rather than cropped twice.
-    sources = {name: True for name in copied.values()}
-    saved = 0
-    if args.crop:
-        # A file several prototypes share can still be cropped, as long as they
-        # all want the same rectangle of it. Skipping every shared file left
-        # about twenty megabytes on the table: eight spawner variants point at
-        # one 2080x3008 sheet and all draw the same 520x376 corner of it.
-        regions = {}
-        for entry in index.values():
-            if entry.get("kind") in UNCROPPABLE:
-                regions.setdefault(entry.get("file"), set()).add(None)
-            groups = list((entry.get("by") or {}).values()) or [entry.get("layers") or []]
-            for group in groups:
-                for layer in group:
-                    box = (layer.get("x", 0), layer.get("y", 0),
-                           layer["width"], layer["height"])
-                    if entry.get("kind") in UNCROPPABLE:
-                        box = None          # a grid is addressed at draw time
-                    regions.setdefault(layer["file"], set()).add(box)
-        for entry in index.values():
-            groups = list((entry.get("by") or {}).values()) or [entry.get("layers") or []]
-            usable = all(len(regions.get(l["file"], set())) == 1
-                         and None not in regions.get(l["file"], set())
-                         for g in groups for l in g)
-            if usable:
-                saved += crop_layers(args.out, entry, sources)
-
-        # A tile only ever draws its size one variants, which are one row of a
-        # sheet that also carries the two, four and eight tile patches.
-        for name, info in tiles.items():
-            target = os.path.join(args.out, info["file"])
-            width = info["cell"] * min(info["count"], info["line_length"] or info["count"])
-            try:
-                with open(target, "rb") as handle:
-                    data = handle.read()
-                before = len(data)
-                cut = png.crop(data, info.get("x", 0), info.get("y", 0), width, info["cell"])
-            except (png.UnsupportedPNG, OSError):
-                continue
-            with open(target, "wb") as handle:
-                handle.write(cut)
-            info["x"] = 0
-            info["y"] = 0
-            saved += before - len(cut)
-
-        # An icon carries its mipmaps beside it; only the leftmost square draws.
-        for name, info in items.items():
-            target = os.path.join(args.out, info["file"])
-            try:
-                with open(target, "rb") as handle:
-                    data = handle.read()
-                before = len(data)
-                cut = png.crop(data, 0, 0, info["size"], info["size"])
-            except (png.UnsupportedPNG, OSError):
-                continue
-            with open(target, "wb") as handle:
-                handle.write(cut)
-            saved += before - len(cut)
-
     with open(os.path.join(args.out, "index.json"), "w") as handle:
         json.dump({"version": 1, "pixels_per_tile": 32,
                    "sprites": index, "tiles": tiles, "items": items}, handle, indent=1)
-    if saved:
-        print("cropped away %.1f MB of sheet nothing draws" % (saved / 1e6))
 
     size = sum(os.path.getsize(os.path.join(args.out, f)) for f in os.listdir(args.out))
     print("%d sprites, %d tiles and %d item icons, %.1f MB in %s"
