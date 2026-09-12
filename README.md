@@ -164,6 +164,9 @@ deliberately does not edit that unit for you.
 
 Then open `http://your-server:8080`.
 
+Longer version, including the optional sprite layer and what to do when
+something is not working: **[docs/INSTALL.md](docs/INSTALL.md)**.
+
 ### Patching a save by hand
 
 ```bash
@@ -218,16 +221,57 @@ All settings are environment variables on the bridge service.
 | `/pollution?surface=&x1=&y1=&x2=&y2=` | pollution per charted chunk in that rectangle |
 | `/tags`, `/alerts` | map tags and recent losses |
 
+## Real game art (optional)
+
+Zoomed in past eight pixels to a world tile, the map can draw Factorio's actual
+sprites instead of flat colours: belts pointing the right way and animating,
+trees as themselves, ore thinning as it is mined, terrain textures underneath.
+Zoomed out, and wherever there is no art for something, it falls back to the
+colour map.
+
+**The map is complete without this.** Colour tiles are the default and always
+have been, they read like the in-game map view, and every feature works with
+them. The sprite layer is an extra for people who have the game installed
+somewhere, not a thing you are missing out on.
+
+### Why you extract it yourself
+
+**Factorio's artwork is Wube's, and this project does not ship it.** Chartorio
+is MIT licensed, and that licence is ours to give over our own code — it is
+emphatically not ours to give over Factorio's assets. So nothing extracted is
+committed to this repository, attached to a release, or distributed in any
+form. Every installation takes its own copy from its own licensed game.
+
+It is the same reason [Mapshot](https://github.com/Palats/mapshot) works this
+way. A mod sidesteps the problem by running inside the game, where the art
+already is; a web map lives outside it and has to bring the art across.
+
+A headless server ships **no artwork at all** — 872 KB of stubs against about a
+gigabyte on a full install — so the extraction runs on a machine that has the
+real game, which is usually not your server.
+
+```bash
+python3 render/sprites.py --out ./extract --only-from-map http://your-server:8080 …
+python3 render/build.py  --in ./extract --out ./sprites --verify
+```
+
+Roughly 160 MB extracted, 48 MB after the build, for a typical world. Only the
+prototypes your world actually contains are taken, so the cost follows how many
+*kinds* of thing you have built rather than how big your map is.
+
+Full steps, including the flags left out above, are in
+[docs/INSTALL.md](docs/INSTALL.md#2-real-game-art-if-you-want-it).
+
 ## Limitations
 
 - **One surface.** The UI is fixed to `nauvis`; the script already reports the
   full surface list, so this is UI work, not protocol work.
 - **No authentication.** Anyone who can reach the port sees the map. Put it
   behind a reverse proxy or a VPN before exposing it.
-- **Not the real art.** A headless server has no graphics and cannot take
-  screenshots, so tiles are drawn from prototype map colours. If you want true
-  rendered imagery you need a graphical Factorio install and a tool like
-  [Mapshot](https://github.com/Palats/mapshot).
+- **Real art needs a one-off extraction.** Out of the box the map draws
+  prototype colours, which is all a headless server can offer: it ships no
+  artwork at all. Factorio's own sprites are an opt-in layer you extract from a
+  graphical install of the game — see [Real game art](#real-game-art-optional).
 - Mods that add tiles or entities work fine; their colours come from their own
   prototypes.
 
@@ -243,4 +287,10 @@ having used cheat commands as long as you stay on custom commands.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT, over this project's own code. See [LICENSE](LICENSE).
+
+**It does not cover Factorio's artwork or data.** Nothing from the game is
+included in this repository. If you use the optional sprite layer you extract
+that art from your own installed copy of Factorio, under Wube's terms, and it
+stays on your own machines — see
+[Real game art](#real-game-art-optional).
