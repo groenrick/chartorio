@@ -483,6 +483,45 @@ function toCss(color) {
   return `rgb(${channel(color.r)}, ${channel(color.g)}, ${channel(color.b)})`;
 }
 
+
+// Rolling stock is drawn from one frame per angle rather than by rotating a
+// picture: the game ships 256 pre-rendered rotations for a locomotive, spread
+// over eight files of a four by eight grid. Rotating a single top-down image
+// would look flat, because these are drawn in perspective.
+function rollingStockFrame(meta, layer, orientation) {
+  const frames = layer.frames || 1;
+  const perFile = (layer.line_length || 1) * (layer.lines_per_file || 1);
+  const frame = ((Math.round((orientation || 0) * frames) % frames) + frames) % frames;
+  const fileIndex = Math.min(Math.floor(frame / perFile), (layer.files || [layer.file]).length - 1);
+  const within = frame % perFile;
+  return {
+    file: (layer.files || [layer.file])[fileIndex],
+    x: (within % (layer.line_length || 1)) * layer.width,
+    y: Math.floor(within / (layer.line_length || 1)) * layer.height,
+  };
+}
+
+function drawRollingStock(car) {
+  const meta = spriteIndex[car.n];
+  if (!meta || meta.kind !== "rotated") return false;
+  const layer = (meta.layers || [])[0];
+  if (!layer) return false;
+  const cell = rollingStockFrame(meta, layer, car.o);
+  const image = spriteImage(cell.file);
+  if (!image.complete || image.failed || !image.naturalWidth) return false;
+  const wide = layer.width * layer.scale / SPRITE_PIXELS_PER_TILE * view.scale;
+  const tall = layer.height * layer.scale / SPRITE_PIXELS_PER_TILE * view.scale;
+  const centre = worldToScreen(car.x + (layer.shift[0] || 0), car.y + (layer.shift[1] || 0));
+  try {
+    context.drawImage(image, cell.x, cell.y, layer.width, layer.height,
+                      centre.x - wide / 2, centre.y - tall / 2, wide, tall);
+  } catch (error) {
+    image.failed = true;
+    return false;
+  }
+  return true;
+}
+
 function drawTrains() {
   for (const raw of state.trains) {
     const train = interpolated(raw, previousTrain(raw.id));
@@ -490,6 +529,26 @@ function drawTrains() {
     const color = TRAIN_STATE_COLORS[train.state] || "#8a7d6d";
     const length = Math.max(6, 6 * view.scale);
     const width = Math.max(3, 2.4 * view.scale);
+
+    // Close in, draw the carriages themselves. A train reports one position and
+    // one orientation; on a curve its carriages share neither, so each is drawn
+    // where the game says it is. Below the threshold, or with no art for it,
+    // the marker stands.
+    if (spritesWanted() && Array.isArray(raw.cars) && raw.cars.length) {
+      let drew = 0;
+      for (const car of raw.cars) {
+        if (drawRollingStock(car)) drew += 1;
+      }
+      if (drew === raw.cars.length) {
+        if (view.scale >= 1.5) {
+          context.fillStyle = "#cbbba2";
+          context.font = "10px ui-monospace, monospace";
+          context.textAlign = "center";
+          context.fillText(train.destination || train.state, screen.x, screen.y - length / 2 - 4);
+        }
+        continue;
+      }
+    }
 
     context.save();
     context.translate(screen.x, screen.y);

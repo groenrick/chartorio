@@ -54,6 +54,8 @@ class Extract:
         self.write("icon.png", sheet(120, 64, 6))          # icon plus mipmaps
         self.write("shared.png", sheet(256, 128, 7))       # two prototypes, same corner
         self.write("orphan.png", sheet(64, 64, 8))         # referenced by nothing
+        for n in range(1, 4):                              # rolling stock, one frame per angle
+            self.write("loco-%d.png" % n, sheet(96, 128, 10 + n))
         index = {
             "version": 1, "pixels_per_tile": 32,
             "sprites": {
@@ -74,6 +76,12 @@ class Extract:
                 "spawner": {"kind": "static", "category": "unit-spawner", "layers": [
                     {"file": "shared.png", "width": 130, "height": 94,
                      "scale": 0.5, "shift": [0, 0], "x": 0, "y": 0}]},
+                "locomotive": {"kind": "rotated", "category": "locomotive", "layers": [
+                    {"file": "loco-1.png",
+                     "files": ["loco-1.png", "loco-2.png", "loco-3.png"],
+                     "width": 48, "height": 32, "scale": 0.5, "shift": [0, 0],
+                     "x": 0, "y": 0, "frames": 24, "line_length": 2,
+                     "lines_per_file": 4}]},
                 "spawner-two": {"kind": "static", "category": "unit-spawner", "layers": [
                     {"file": "shared.png", "width": 130, "height": 94,
                      "scale": 0.5, "shift": [0, 0], "x": 0, "y": 0}]},
@@ -151,6 +159,26 @@ class BuildStep(unittest.TestCase):
             index = json.load(handle)
         self.assertEqual(index["tiles"]["grass-1"]["x"], 0)
         self.assertEqual(index["sprites"]["furnace"]["layers"][0]["x"], 0)
+
+
+    def test_a_rotated_sheet_survives_whole(self):
+        # A locomotive's layer names its first frame's rectangle. Cropping to
+        # that is pixel-perfect and throws away every other rotation, and the
+        # old verify passed because the crop did match the source.
+        width, height, _, _ = png.read(self.read(self.target, "loco-1.png"))
+        self.assertEqual((width, height), (96, 128))
+
+    def test_every_sheet_of_a_multi_file_layer_is_kept(self):
+        # Reading only `file` dropped seven of a locomotive's eight sheets as
+        # unreferenced.
+        for n in (1, 2, 3):
+            self.assertTrue(os.path.isfile(os.path.join(self.target, "loco-%d.png" % n)),
+                            "loco-%d.png was dropped" % n)
+
+    def test_verify_catches_a_sheet_the_index_still_needs(self):
+        os.remove(os.path.join(self.target, "loco-2.png"))
+        _, problems = build.verify(self.source, self.target)
+        self.assertTrue(any("loco-2.png" in p for p in problems), problems)
 
     def test_verify_passes_on_a_good_build(self):
         checked, problems = build.verify(self.source, self.target)

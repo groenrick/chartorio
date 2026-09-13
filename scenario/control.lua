@@ -458,6 +458,26 @@ local function collect_trains()
           state = train_state_names[train.state] or "unknown",
           destination = destination and destination.backer_name or nil,
           carriages = #train.carriages,
+          -- Each carriage's own position and orientation, so the map can draw
+          -- rolling stock rather than one marker for a whole train. A train
+          -- reports one position and one orientation; on a curve its carriages
+          -- do not share either. No search is involved — the train already
+          -- holds them — and the list is short.
+          cars = (function()
+            local cars = {}
+            for _, car in pairs(train.carriages) do
+              if car.valid then
+                local at = car.position
+                cars[#cars + 1] = {
+                  n = car.name,
+                  x = math.floor(at.x * 16) / 16,
+                  y = math.floor(at.y * 16) / 16,
+                  o = math.floor((car.orientation or 0) * 1024) / 1024,
+                }
+              end
+            end
+            return cars
+          end)(),
           passengers = #train.passengers,
         }
       end

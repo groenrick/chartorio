@@ -119,6 +119,7 @@ function boot() {
               + " expandRuns, tileVariant, terrainKey, terrainCovers, spriteDepth,"
               + " encodeView, decodeView, applyView, viewPrecision, LAYER_BITS,"
               + " itemsWanted, __setItemIndex(v) { itemIndex = v; },"
+              + " rollingStockFrame, drawRollingStock,"
               + " get follow() { return follow; }, set follow(v) { follow = v; },"
               + " __setSpriteIndex(v) { spriteIndex = v; },"
               + " __setTerrain(x, y, rev) { terrainCache.set(terrainKey(x, y), { revision: rev, canvas: {} }); },"
@@ -632,6 +633,52 @@ test("an old link without the items bit leaves the layer off", () => {
   // "6n" is an eight bit mask from before the items layer existed.
   page.applyView(page.decodeView("#1/0/0/2/6n"));
   assert.equal(page.layers.items, false, "a link that predates the layer must not switch it on");
+});
+
+test("a locomotive picks the frame for the way it is pointing", () => {
+  // 256 rotations over eight files of a four by eight grid. Rotating one
+  // top-down image would look flat: these are drawn in perspective.
+  const page = boot();
+  const layer = { files: ["a.png","b.png","c.png","d.png","e.png","f.png","g.png","h.png"],
+                  width: 474, height: 458, frames: 256, line_length: 4, lines_per_file: 8 };
+  const north = page.rollingStockFrame({}, layer, 0);
+  assert.equal(north.file, "a.png");
+  assert.equal(north.x, 0);
+  assert.equal(north.y, 0);
+  // A quarter turn is frame 64: the third file, first cell.
+  const east = page.rollingStockFrame({}, layer, 0.25);
+  assert.equal(east.file, "c.png", "64 frames in is the third file of 32");
+  assert.equal(east.x, 0);
+  assert.equal(east.y, 0);
+});
+
+test("a frame lands on the right cell of its grid", () => {
+  const page = boot();
+  const layer = { files: ["a.png"], width: 100, height: 50, frames: 32,
+                  line_length: 4, lines_per_file: 8 };
+  // frame 5 -> second row, second column
+  const cell = page.rollingStockFrame({}, layer, 5 / 32);
+  assert.equal(cell.x, 100, "column 1");
+  assert.equal(cell.y, 50, "row 1");
+});
+
+test("orientation wraps rather than running off the sheet", () => {
+  // orientation is a fraction of a turn and 1.0 is the same as 0.
+  const page = boot();
+  const layer = { files: ["a.png","b.png"], width: 10, height: 10, frames: 64,
+                  line_length: 4, lines_per_file: 8 };
+  for (const o of [0, 0.5, 0.999, 1, 1.5, -0.25]) {
+    const cell = page.rollingStockFrame({}, layer, o);
+    assert.ok(layer.files.includes(cell.file), `orientation ${o} chose ${cell.file}`);
+    assert.ok(cell.x >= 0 && cell.x < 40, `orientation ${o} x=${cell.x}`);
+    assert.ok(cell.y >= 0 && cell.y < 80, `orientation ${o} y=${cell.y}`);
+  }
+});
+
+test("a train with no art falls back to its marker", () => {
+  const page = boot();
+  page.__setSpriteIndex({ locomotive: { kind: "none", tiles: [1, 1] } });
+  assert.equal(page.drawRollingStock({ n: "locomotive", x: 0, y: 0, o: 0 }), false);
 });
 
 test("ore totals read the way the game writes them", () => {
