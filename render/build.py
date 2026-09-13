@@ -29,7 +29,12 @@ MANIFEST = "build.json"
 # These address a grid at draw time — belts step through sixteen frames across
 # twenty orientations, ore across richness by variation, underground belts
 # offset by direction — so their sheets must survive whole.
-GRID_KINDS = {"belt", "ore", "underground"}
+# "rotated" is here for a reason worth remembering: a locomotive's sheet is one
+# frame per angle, and its layer names the first frame's rectangle. Cropping to
+# that rectangle is pixel-perfect and threw away 255 rotations, and --verify
+# passed, because the crop did match the source rectangle. Verification can
+# only check what it is told to look at.
+GRID_KINDS = {"belt", "ore", "underground", "rotated"}
 
 
 def digest(path):
@@ -60,7 +65,11 @@ def plan_crops(index):
             for layer in group:
                 box = None if grid else (layer.get("x", 0), layer.get("y", 0),
                                          layer["width"], layer["height"])
-                regions.setdefault(layer["file"], set()).add(box)
+                for sheet in sheets_of(layer):
+                    # A layer spread over several files is only croppable to one
+                    # rectangle if it is a single file in the first place.
+                    regions.setdefault(sheet, set()).add(
+                        box if len(sheets_of(layer)) == 1 else None)
     # A tile draws only its size one variants, one row of a sheet that also
     # carries the two, four and eight tile patches.
     for info in index.get("tiles", {}).values():
@@ -78,12 +87,18 @@ def plan_crops(index):
     return plan
 
 
+def sheets_of(layer):
+    """Every file a layer draws from. Rolling stock spreads its rotations over
+    several, and reading only `file` dropped seven of a locomotive's eight."""
+    return list(layer.get("files") or [layer["file"]])
+
+
 def referenced(index):
     names = set()
     for entry in index.get("sprites", {}).values():
         for group in layer_groups(entry):
             for layer in group:
-                names.add(layer["file"])
+                names.update(sheets_of(layer))
     for info in index.get("tiles", {}).values():
         names.add(info["file"])
     for info in index.get("items", {}).values():
@@ -181,6 +196,15 @@ def verify(source, target):
         record = json.load(handle)
     problems = []
     checked = 0
+
+    # Everything the index asks for must still be there. Checking only the files
+    # that were transformed missed seven of a locomotive's eight sheets being
+    # dropped as unreferenced.
+    with open(os.path.join(target, "index.json")) as handle:
+        index = json.load(handle)
+    for name in sorted(referenced(index)):
+        if not os.path.isfile(os.path.join(target, name)):
+            problems.append("%s: the index needs it and the build has not got it" % name)
     for name, info in sorted(record["files"].items()):
         built = os.path.join(target, name)
         origin = os.path.join(source, name)

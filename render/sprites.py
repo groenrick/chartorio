@@ -118,6 +118,44 @@ def sprite_for(prototype):
     return None
 
 
+def rotated_layers(prototype):
+    """A rolling stock's picture: one frame per angle, spread over several
+    files.
+
+    This is the one shape the extractor could not read. A locomotive carries
+    256 rotations as `filenames` — eight files of a four by eight grid, said by
+    `line_length` and `lines_per_file` — and everything else in the game uses a
+    single `filename`, so the sheet was silently missed.
+
+    Only the base layer is taken. A locomotive also has a mask, tinted with the
+    train's own colour and composited over the base, which a canvas cannot do
+    without an offscreen pass per colour; trains are drawn in the game's art but
+    not in their owner's livery.
+    """
+    node = (prototype.get("pictures") or {}).get("rotated")
+    if not isinstance(node, dict):
+        return None
+    for layer in node.get("layers") or [node]:
+        if not isinstance(layer, dict):
+            continue
+        if layer.get("draw_as_shadow") or "mask" in (layer.get("filenames") or [""])[0]:
+            continue
+        files = layer.get("filenames") or ([layer["filename"]] if layer.get("filename") else [])
+        if not files or not layer.get("width"):
+            continue
+        return {
+            "files": files,
+            "width": layer["width"],
+            "height": layer["height"],
+            "scale": layer.get("scale", 1),
+            "shift": layer.get("shift") or [0, 0],
+            "frames": layer.get("direction_count", 1),
+            "line_length": layer.get("line_length", 1),
+            "lines_per_file": layer.get("lines_per_file", 1),
+        }
+    return None
+
+
 def all_layers(node, depth=0):
     """Every drawable layer of a picture, in draw order, shadows skipped.
 
@@ -520,6 +558,9 @@ def main():
                 return out or None
 
             entry = None
+            rotated = (rotated_layers(prototype)
+                       if category in ("locomotive", "cargo-wagon", "fluid-wagon",
+                                       "artillery-wagon") else None)
             variations = tree_variations(prototype) if category == "tree" else None
             pipe = pipe_layers(prototype)
             underground = underground_layers(prototype)
@@ -528,7 +569,33 @@ def main():
             if not (variations or pipe or underground or ore):
                 directional = directional_layers(prototype)
 
-            if variations:
+            if rotated:
+                served = []
+                # Not `name`: that is the prototype being indexed, and shadowing
+                # it here filed the locomotive under one of its own filenames.
+                for sheet in rotated["files"]:
+                    source = resolve(sheet, data_dir)
+                    if not source or not os.path.isfile(source):
+                        served = []
+                        break
+                    if source not in copied:
+                        target = os.path.basename(source)
+                        while target in copied.values():
+                            target = "_" + target
+                        shutil.copy2(source, os.path.join(args.out, target))
+                        copied[source] = target
+                    served.append(copied[source])
+                if served:
+                    entry = {"kind": "rotated", "layers": [{
+                        "file": served[0], "files": served,
+                        "width": rotated["width"], "height": rotated["height"],
+                        "scale": rotated["scale"], "shift": rotated["shift"],
+                        "x": 0, "y": 0,
+                        "frames": rotated["frames"],
+                        "line_length": rotated["line_length"],
+                        "lines_per_file": rotated["lines_per_file"],
+                    }]}
+            elif variations:
                 by = {}
                 for number, layers in enumerate(variations, start=1):
                     served = [take(layer) for layer in layers]
