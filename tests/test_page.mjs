@@ -635,6 +635,42 @@ test("an old link without the items bit leaves the layer off", () => {
   assert.equal(page.layers.items, false, "a link that predates the layer must not switch it on");
 });
 
+test("a symmetric wagon covers half a turn with its frames", () => {
+  // A cargo wagon has 128 frames for 180 degrees, because it looks the same
+  // from either end; a locomotive has 256 for the whole turn. Both step by a
+  // 256th of a turn. Reading 128 as a whole turn drew every wagon at twice the
+  // angle it should be.
+  const page = boot();
+  const wagon = { files: ["w1.png","w2.png","w3.png","w4.png"], width: 442, height: 408,
+                  frames: 128, line_length: 4, lines_per_file: 8 };
+  const loco  = { files: ["l1.png","l2.png","l3.png","l4.png","l5.png","l6.png","l7.png","l8.png"],
+                  width: 474, height: 458, frames: 256, line_length: 4, lines_per_file: 8 };
+  // A quarter turn is 64 steps for both; the wagon wraps at 128 and so lands
+  // on the same cell as the locomotive does.
+  const w = page.rollingStockFrame({}, wagon, 0.25);
+  const l = page.rollingStockFrame({}, loco, 0.25);
+  assert.equal(w.x, l.x, "same angle, same column");
+  assert.equal(w.y, l.y, "same angle, same row");
+  // Half a turn later the wagon is back where it started; the locomotive is not.
+  const wHalf = page.rollingStockFrame({}, wagon, 0.75);
+  assert.equal(wHalf.x, w.x, "a wagon looks the same from either end");
+  assert.equal(wHalf.y, w.y);
+  const lHalf = page.rollingStockFrame({}, loco, 0.75);
+  assert.ok(lHalf.file !== l.file || lHalf.y !== l.y, "a locomotive has a front");
+});
+
+test("the wagon orientation seen on the live map lands on the right frame", () => {
+  // Observed: locomotives at 0.375 and wagons at 0.875 on the same train —
+  // half a turn apart, which is the same line for a symmetric wagon.
+  const page = boot();
+  const wagon = { files: ["w1.png","w2.png","w3.png","w4.png"], width: 442, height: 408,
+                  frames: 128, line_length: 4, lines_per_file: 8 };
+  const at875 = page.rollingStockFrame({}, wagon, 0.875);
+  const at375 = page.rollingStockFrame({}, wagon, 0.375);
+  assert.deepEqual([at875.file, at875.x, at875.y], [at375.file, at375.x, at375.y],
+                   "a wagon half a turn round draws the same way");
+});
+
 test("a locomotive picks the frame for the way it is pointing", () => {
   // 256 rotations over eight files of a four by eight grid. Rotating one
   // top-down image would look flat: these are drawn in perspective.
@@ -653,11 +689,12 @@ test("a locomotive picks the frame for the way it is pointing", () => {
 });
 
 test("a frame lands on the right cell of its grid", () => {
+  // Sheets step by a 256th of a turn, so the angle that picks frame 5 is
+  // 5/256 of a turn, not 5 of however many frames the sheet happens to hold.
   const page = boot();
   const layer = { files: ["a.png"], width: 100, height: 50, frames: 32,
                   line_length: 4, lines_per_file: 8 };
-  // frame 5 -> second row, second column
-  const cell = page.rollingStockFrame({}, layer, 5 / 32);
+  const cell = page.rollingStockFrame({}, layer, 5 / 256);
   assert.equal(cell.x, 100, "column 1");
   assert.equal(cell.y, 50, "row 1");
 });

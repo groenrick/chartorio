@@ -488,10 +488,19 @@ function toCss(color) {
 // picture: the game ships 256 pre-rendered rotations for a locomotive, spread
 // over eight files of a four by eight grid. Rotating a single top-down image
 // would look flat, because these are drawn in perspective.
+// Rolling stock is drawn at a constant angular step of a 256th of a turn, so a
+// sheet's frame count says how much of a turn it covers rather than how finely:
+// a locomotive has 256 frames for the whole turn, and a cargo wagon 128 for
+// half of one, because a wagon looks the same from either end and the game
+// reuses the frames. Reading 128 as a whole turn drew every wagon at twice the
+// angle it should be.
+const ROLLING_STOCK_FRAMES_PER_TURN = 256;
+
 function rollingStockFrame(meta, layer, orientation) {
   const frames = layer.frames || 1;
   const perFile = (layer.line_length || 1) * (layer.lines_per_file || 1);
-  const frame = ((Math.round((orientation || 0) * frames) % frames) + frames) % frames;
+  const step = Math.round((orientation || 0) * ROLLING_STOCK_FRAMES_PER_TURN);
+  const frame = ((step % frames) + frames) % frames;
   const fileIndex = Math.min(Math.floor(frame / perFile), (layer.files || [layer.file]).length - 1);
   const within = frame % perFile;
   return {
