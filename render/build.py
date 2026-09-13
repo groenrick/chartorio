@@ -37,6 +37,96 @@ MANIFEST = "build.json"
 GRID_KINDS = {"belt", "ore", "underground", "rotated"}
 
 
+def read_cached(path, cache):
+    """Decode a sheet once.
+
+    A rail's five layers all come out of 4096x8192 sheets, and there are eight
+    directions of four rail types. Decoding each sheet per crop is 160 full
+    decodes of a 33 megapixel image in pure Python, which does not finish in
+    any useful time.
+    """
+    if path not in cache:
+        with open(path, "rb") as handle:
+            cache[path] = png.read(handle.read())
+    return cache[path]
+
+
+def crop_decoded(decoded, x, y, width, height):
+    full_width, full_height, channels, pixels = decoded
+    if x < 0 or y < 0 or x + width > full_width or y + height > full_height:
+        raise png.UnsupportedPNG("crop outside the sheet")
+    stride = full_width * channels
+    out = bytearray()
+    for row in range(y, y + height):
+        start = row * stride + x * channels
+        out += pixels[start:start + width * channels]
+    return channels, bytes(out)
+
+
+def flatten_group(source, target, layers, copied, cache):
+    """Stack a group of layers into one image.
+
+    A rail is five pictures at fixed offsets — ballast, inner fill, sleepers,
+    backplates, metals — and every one of them is sampled out of a 4096x8192
+    sheet that the browser decodes to 134 MB. Five such sheets is 670 MB of
+    image memory to draw track, and five drawImage calls for every rail on
+    screen.
+
+    Stacked once here instead, a rail direction becomes a single image a few
+    hundred pixels square: one call to draw it, and the giant sheets are never
+    loaded at all.
+
+    Only for layers that are drawn together every time. Anything selected at
+    draw time — a belt's frame, an ore's richness, a locomotive's angle — has
+    to stay separate.
+    """
+    boxes = []
+    for layer in layers:
+        shift = layer.get("shift") or [0, 0]
+        # Shift is in world tiles; a layer's own pixels are `scale` of a tile.
+        left = shift[0] * 32 / layer["scale"] - layer["width"] / 2
+        top = shift[1] * 32 / layer["scale"] - layer["height"] / 2
+        boxes.append((left, top, left + layer["width"], top + layer["height"]))
+    if any(abs(l["scale"] - layers[0]["scale"]) > 1e-9 for l in layers):
+        return None                      # mixed scales: not safely stackable
+    left = min(b[0] for b in boxes)
+    top = min(b[1] for b in boxes)
+    width = int(round(max(b[2] for b in boxes) - left))
+    height = int(round(max(b[3] for b in boxes) - top))
+    if width <= 0 or height <= 0 or width * height > 4096 * 4096:
+        return None
+
+    canvas = png.blank(width, height)
+    for layer, box in zip(layers, boxes):
+        try:
+            decoded = read_cached(os.path.join(source, layer["file"]), cache)
+            channels, pixels = crop_decoded(decoded, layer.get("x", 0),
+                                            layer.get("y", 0),
+                                            layer["width"], layer["height"])
+        except (png.UnsupportedPNG, OSError, KeyError):
+            return None
+        if channels != 4:
+            return None
+        canvas = png.over(canvas, width, height, pixels,
+                          layer["width"], layer["height"],
+                          int(round(box[0] - left)), int(round(box[1] - top)))
+
+    name = "flat-%s.png" % hashlib.sha256(
+        ("|".join("%s@%s,%s" % (l["file"], l.get("x", 0), l.get("y", 0))
+                  for l in layers)).encode()).hexdigest()[:16]
+    if name not in copied:
+        with open(os.path.join(target, name), "wb") as handle:
+            handle.write(png.write(width, height, 4, canvas))
+        copied.add(name)
+    scale = layers[0]["scale"]
+    return {
+        "file": name, "width": width, "height": height, "scale": scale,
+        # The union's own centre, back in world tiles.
+        "shift": [(left + width / 2) * scale / 32, (top + height / 2) * scale / 32],
+        "x": 0, "y": 0,
+    }
+
+
 def digest(path):
     hasher = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -121,7 +211,36 @@ def rewrite_offsets(index, plan):
             info["y"] = 0
 
 
-def build(source, target, crop=True, drop_unreferenced=True):
+def flatten(source, target, index):
+    """Replace every stack of layers that is always drawn together with one
+    image. Returns how many groups were flattened."""
+    made = set()
+    cache = {}
+    done = 0
+    for entry in index.get("sprites", {}).values():
+        if entry.get("kind") in GRID_KINDS:
+            continue
+        groups = entry.get("by")
+        if groups:
+            for key, layers in list(groups.items()):
+                if len(layers) < 2:
+                    continue
+                flat = flatten_group(source, target, layers, made, cache)
+                if flat:
+                    groups[key] = [flat]
+                    done += 1
+        else:
+            layers = entry.get("layers") or []
+            if len(layers) < 2:
+                continue
+            flat = flatten_group(source, target, layers, made, cache)
+            if flat:
+                entry["layers"] = [flat]
+                done += 1
+    return done
+
+
+def build(source, target, crop=True, drop_unreferenced=True, flatten_layers=True):
     with open(os.path.join(source, "index.json")) as handle:
         index = json.load(handle)
 
@@ -169,14 +288,31 @@ def build(source, target, crop=True, drop_unreferenced=True):
     if crop:
         rewrite_offsets(index, {k: v for k, v in plan.items()
                                 if record["files"].get(k, {}).get("crop")})
+
+    # Flattening happens after cropping, so a stacked layer is cut from an
+    # already trimmed sheet, and before the index is written.
+    if flatten_layers:
+        record["flattened"] = flatten(target, target, index)
+        # Sheets that only existed to be stacked are now dead weight.
+        if drop_unreferenced:
+            keep_now = referenced(index)
+            for name in list(record["files"]):
+                if name not in keep_now and os.path.isfile(os.path.join(target, name)):
+                    os.remove(os.path.join(target, name))
+                    record["dropped"].append(name)
+                    record["files"].pop(name)
+            after = sum(os.path.getsize(os.path.join(target, f))
+                        for f in os.listdir(target) if f.endswith(".png"))
+            record["bytes_out"] = after
     with open(os.path.join(target, "index.json"), "w") as handle:
         json.dump(index, handle, indent=1)
 
     record.update({
-        "version": 1,
+        "version": 2,
         "built": int(time.time()),
         "source": os.path.abspath(source),
-        "settings": {"crop": crop, "drop_unreferenced": drop_unreferenced},
+        "settings": {"crop": crop, "drop_unreferenced": drop_unreferenced,
+                     "flatten": flatten_layers},
         "bytes_in": before,
         "bytes_out": after,
     })
@@ -206,6 +342,8 @@ def verify(source, target):
         if not os.path.isfile(os.path.join(target, name)):
             problems.append("%s: the index needs it and the build has not got it" % name)
     for name, info in sorted(record["files"].items()):
+        if name.startswith("flat-"):
+            continue
         built = os.path.join(target, name)
         origin = os.path.join(source, name)
         if not os.path.isfile(built):
@@ -238,6 +376,9 @@ def main():
     parser.add_argument("--no-crop", action="store_true", help="copy sheets whole")
     parser.add_argument("--keep-unreferenced", action="store_true",
                         help="keep files the index never mentions")
+    parser.add_argument("--no-flatten", action="store_true",
+                        help="keep stacked layers separate; they will be drawn "
+                             "one call each from their original sheets")
     parser.add_argument("--verify", action="store_true",
                         help="check every cropped sprite against its source rectangle")
     args = parser.parse_args()
@@ -249,7 +390,8 @@ def main():
 
     record = build(args.source, args.target,
                    crop=not args.no_crop,
-                   drop_unreferenced=not args.keep_unreferenced)
+                   drop_unreferenced=not args.keep_unreferenced,
+                   flatten_layers=not args.no_flatten)
     saved = record["bytes_in"] - record["bytes_out"]
     print("%s -> %s" % (args.source, args.target))
     print("  %.1f MB in, %.1f MB out, %.1f MB saved (%.1fx)"
@@ -258,6 +400,8 @@ def main():
     cropped = sum(1 for f in record["files"].values() if f["crop"])
     print("  %d cropped, %d kept whole, %d dropped"
           % (cropped, len(record["kept_whole"]), len(record["dropped"])))
+    if record.get("flattened"):
+        print("  %d layer stacks flattened into one image each" % record["flattened"])
     if record.get("refused"):
         print("  %d refused and copied whole" % len(record["refused"]))
 

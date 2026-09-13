@@ -137,6 +137,47 @@ class AgainstTheGamesOwnArt(unittest.TestCase):
         w, h, _, _ = png.read(cropped)
         self.assertEqual((w, h), (height, height))
 
+class Compositing(unittest.TestCase):
+    """Stacking layers. The first attempt overflowed a byte at low alpha,
+    because dividing the destination term early truncated it to nothing in the
+    denominator while the numerator kept it."""
+
+    def one(self, base, layer):
+        return list(png.over(bytes(base), 1, 1, bytes(layer), 1, 1, 0, 0))
+
+    def test_an_opaque_layer_replaces_what_is_under_it(self):
+        self.assertEqual(self.one([9, 9, 9, 255], [255, 0, 0, 255]), [255, 0, 0, 255])
+
+    def test_a_transparent_layer_changes_nothing(self):
+        self.assertEqual(self.one([255, 0, 0, 255], [0, 255, 0, 0]), [255, 0, 0, 255])
+
+    def test_half_alpha_blends_halfway(self):
+        self.assertEqual(self.one([0, 0, 0, 255], [255, 255, 255, 128]),
+                         [128, 128, 128, 255])
+
+    def test_no_combination_escapes_a_byte(self):
+        # 1, 1 was the case that crashed the build: both alphas low.
+        for alpha in range(0, 256, 3):
+            for under in range(0, 256, 7):
+                for channel in (0, 128, 255):
+                    out = self.one([channel, channel, channel, under],
+                                   [255, 255, 255, alpha])
+                    self.assertTrue(all(0 <= v <= 255 for v in out),
+                                    "alpha=%d under=%d -> %s" % (alpha, under, out))
+
+    def test_a_layer_is_placed_at_its_offset(self):
+        base = png.blank(3, 1)
+        out = png.over(base, 3, 1, bytes([255, 0, 0, 255]), 1, 1, 1, 0)
+        self.assertEqual(list(out[0:4]), [0, 0, 0, 0])
+        self.assertEqual(list(out[4:8]), [255, 0, 0, 255])
+
+    def test_a_layer_falling_off_the_edge_is_clipped_not_wrapped(self):
+        base = png.blank(2, 1)
+        out = png.over(base, 2, 1, bytes([255, 0, 0, 255] * 2), 2, 1, 1, 0)
+        self.assertEqual(list(out[4:8]), [255, 0, 0, 255])
+        self.assertEqual(len(out), 8)
+
+
 
 if __name__ == "__main__":
     unittest.main()
