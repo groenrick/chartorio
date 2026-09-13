@@ -81,5 +81,74 @@ class ResolvingPaths(unittest.TestCase):
         self.assertIsNone(sprites.resolve("__base/graphics/lab.png", "/game/data"))
 
 
+
+class RailDirections(unittest.TestCase):
+    """Rails declare all eight directions and are drawn from five stacked
+    pictures. Both were new: everything before them had four directions and one
+    picture."""
+
+    def rail(self, **directions):
+        return {"pictures": {name: value for name, value in directions.items()}}
+
+    def parts(self, tag):
+        return {part: layer("%s-%s.png" % (tag, part))
+                for part in ("stone_path_background", "stone_path", "ties",
+                             "backplates", "metals")}
+
+    def test_all_eight_directions_are_taken(self):
+        names = ("north", "northeast", "east", "southeast",
+                 "south", "southwest", "west", "northwest")
+        found = sprites.directional_layers(self.rail(**{n: self.parts(n) for n in names}))
+        self.assertEqual(sorted(found), [0, 2, 4, 6, 8, 10, 12, 14])
+
+    def test_the_diagonals_are_not_lost_to_the_four_cardinals(self):
+        # Matching on north/east/south/west first would take those and drop the
+        # diagonals, leaving every diagonal rail drawn as a straight one.
+        names = ("north", "northeast", "east", "southeast",
+                 "south", "southwest", "west", "northwest")
+        found = sprites.directional_layers(self.rail(**{n: self.parts(n) for n in names}))
+        self.assertIn(2, found, "northeast")
+        self.assertIn(14, found, "northwest")
+
+    def test_a_rail_is_five_pictures_in_drawing_order(self):
+        # Ballast, its inner fill, sleepers, the plates, then the rails. Any
+        # other order puts the stone bed over the metals.
+        # A rail always declares all eight keys, even where the picture is
+        # empty, so the fixture does too.
+        named = {n: self.parts(n) for n in ("north", "northeast", "east", "southeast")}
+        named.update({n: {} for n in ("south", "southwest", "west", "northwest")})
+        found = sprites.directional_layers(self.rail(**named))
+        files = [l["filename"].split("-", 1)[1] for l in found[0]]
+        self.assertEqual(files, ["stone_path_background.png", "stone_path.png",
+                                 "ties.png", "backplates.png", "metals.png"])
+
+    def test_a_straight_rail_keeps_only_the_directions_it_defines(self):
+        # Factorio defines four for a straight rail, because a north-south rail
+        # is the same picture whichever end you look from, and the game only
+        # ever reports 0, 2, 4 and 6 for one.
+        found = sprites.directional_layers(self.rail(
+            north=self.parts("north"), northeast=self.parts("northeast"),
+            east=self.parts("east"), southeast=self.parts("southeast"),
+            south={}, southwest={}, west={}, northwest={}))
+        self.assertEqual(sorted(found), [0, 2, 4, 6])
+
+    def test_the_segment_visualisation_is_not_drawn(self):
+        # The game draws it for debugging; it is not part of the track.
+        parts = self.parts("north")
+        parts["segment_visualisation_middle"] = layer("debug.png")
+        named = {"north": parts, "northeast": self.parts("ne"),
+                 "east": self.parts("e"), "southeast": self.parts("se")}
+        named.update({n: {} for n in ("south", "southwest", "west", "northwest")})
+        found = sprites.directional_layers(self.rail(**named))
+        self.assertTrue(all("debug" not in l["filename"] for l in found[0]))
+
+    def test_a_four_direction_entity_is_unchanged(self):
+        found = sprites.directional_layers({"graphics_set": {"animation": {
+            "north": layer("n.png"), "east": layer("e.png"),
+            "south": layer("s.png"), "west": layer("w.png")}}})
+        self.assertEqual(sorted(found), [0, 4, 8, 12])
+
+
+
 if __name__ == "__main__":
     unittest.main()
