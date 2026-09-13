@@ -119,12 +119,14 @@ function boot() {
               + " expandRuns, tileVariant, terrainKey, terrainCovers, spriteDepth,"
               + " encodeView, decodeView, applyView, viewPrecision, LAYER_BITS,"
               + " itemsWanted, __setItemIndex(v) { itemIndex = v; },"
-              + " rollingStockFrame, drawRollingStock,"
+              + " rollingStockFrame, drawRollingStock, preloadOrder, spritesInView, terrainWanted,"
+              + " __setReady(v) { spritesReady = v; },"
               + " get follow() { return follow; }, set follow(v) { follow = v; },"
               + " __setSpriteIndex(v) { spriteIndex = v; },"
               + " __setTerrain(x, y, rev) { terrainCache.set(terrainKey(x, y), { revision: rev, canvas: {} }); },"
               + " __setCharted(x, y, rev) { charted.set(key(x, y), rev); },"
-              + " __setSpritesAvailable(v) { spritesAvailable = v; },"
+              + " __setSpritesAvailable(v) { spritesAvailable = v;"
+              + "   spritesReady = { tiles: v, sprites: v, items: v }; },"
               + " get transport() { return transport; } };";
   vm.runInContext(extractScript(html) + probe, context, { filename: "index.html" });
   // Keep the accessors as accessors, so `transport` stays live, and let
@@ -716,6 +718,62 @@ test("a train with no art falls back to its marker", () => {
   const page = boot();
   page.__setSpriteIndex({ locomotive: { kind: "none", tiles: [1, 1] } });
   assert.equal(page.drawRollingStock({ n: "locomotive", x: 0, y: 0, o: 0 }), false);
+});
+
+test("the artwork is fetched in the order that affects the most views", () => {
+  // Terrain is a hundred kilobytes and affects every view; a locomotive is four
+  // megabytes and affects the views with trains in them. Index order would
+  // fetch the slowest, rarest sheets first.
+  const page = boot();
+  const order = page.preloadOrder({
+    tiles: { grass: { file: "grass.png" } },
+    items: { coal: { file: "coal-icon.png" } },
+    sprites: {
+      furnace: { kind: "static", layers: [{ file: "furnace.png" }] },
+      locomotive: { kind: "rotated", layers: [{ files: ["loco1.png", "loco2.png"] }] },
+    },
+  });
+  // Array.from: a list built inside the vm context carries that context's
+  // prototype, which deepStrictEqual rejects.
+  assert.deepEqual(Array.from(order.tiles), ["grass.png"]);
+  assert.deepEqual(Array.from(order.common), ["furnace.png"]);
+  assert.deepEqual(Array.from(order.heavy), ["loco1.png", "loco2.png"],
+                   "rolling stock goes last");
+});
+
+test("terrain turns on before the entity sprites do", () => {
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.layers.terrain = true;
+  page.view.scale = 24;
+  page.__setReady({ tiles: false, sprites: false, items: false });
+  assert.equal(page.terrainWanted(), false);
+  assert.equal(page.spritesWanted(), false);
+  page.__setReady({ tiles: true, sprites: false, items: false });
+  assert.equal(page.terrainWanted(), true, "terrain is ready on its own");
+  assert.equal(page.spritesWanted(), false, "entities are not");
+});
+
+test("a layer with art still loading stays off rather than half drawn", () => {
+  // Half a base in real art and half in colour blocks reads as broken; the
+  // colour map on its own does not.
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.layers.terrain = true;
+  page.view.scale = 24;
+  page.__setReady({ tiles: true, sprites: false, items: false });
+  assert.equal(page.spritesWanted(), false);
+  assert.equal(page.spritesInView(), true, "the view still wants them, the art is not there");
+});
+
+test("entities are still asked for while the art loads", () => {
+  // So they are ready to draw the moment it lands, rather than starting then.
+  const page = boot();
+  page.__setSpritesAvailable(true);
+  page.layers.terrain = true;
+  page.view.scale = 24;
+  page.__setReady({ tiles: false, sprites: false, items: false });
+  assert.equal(page.spritesInView(), true);
 });
 
 test("ore totals read the way the game writes them", () => {
