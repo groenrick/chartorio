@@ -44,9 +44,15 @@ def read(data):
     """Return (width, height, channels, pixel bytes), row major."""
     header = None
     body = bytearray()
+    palette = None
+    transparency = None
     for tag, payload in _chunks(data):
         if tag == b"IHDR":
             header = struct.unpack(">IIBBBBB", payload[:13])
+        elif tag == b"PLTE":
+            palette = payload
+        elif tag == b"tRNS":
+            transparency = payload
         elif tag == b"IDAT":
             body += payload
         elif tag == b"IEND":
@@ -56,9 +62,13 @@ def read(data):
     width, height, depth, colour, compression, filtering, interlace = header
     if depth != 8 or compression != 0 or filtering != 0 or interlace != 0:
         raise UnsupportedPNG("only 8 bit, non interlaced")
-    channels = {2: 3, 6: 4}.get(colour)
+    # The game ships more than RGB: rail-metals.png is greyscale with alpha,
+    # and refusing it meant a rail's five layers could not be stacked at all.
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(colour)
     if channels is None:
-        raise UnsupportedPNG("only RGB and RGBA")
+        raise UnsupportedPNG("unsupported colour type %d" % colour)
+    if colour == 3 and not palette:
+        raise UnsupportedPNG("palette image with no palette")
 
     raw = zlib.decompress(bytes(body))
     stride = width * channels
@@ -89,6 +99,24 @@ def read(data):
             raise UnsupportedPNG("unknown filter %d" % filter_type)
         out[row * stride:(row + 1) * stride] = line
         previous = line
+
+    # Expanded to RGB or RGBA, so everything downstream sees one of two shapes.
+    if colour == 0:
+        out = bytearray(b for value in out for b in (value, value, value))
+        channels = 3
+    elif colour == 4:
+        out = bytearray(b for i in range(0, len(out), 2)
+                        for b in (out[i], out[i], out[i], out[i + 1]))
+        channels = 4
+    elif colour == 3:
+        expanded = bytearray()
+        alpha = transparency or b""
+        for index in out:
+            base = index * 3
+            expanded += palette[base:base + 3]
+            expanded.append(alpha[index] if index < len(alpha) else 255)
+        out = expanded
+        channels = 4
     return width, height, channels, bytes(out)
 
 
@@ -109,6 +137,51 @@ def write(width, height, channels, pixels):
             + chunk(b"IHDR", header)
             + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
             + chunk(b"IEND", b""))
+
+
+def blank(width, height):
+    return bytes(width * height * 4)
+
+
+def over(base, base_w, base_h, layer, layer_w, layer_h, at_x, at_y):
+    """Composite one RGBA layer over another, source-over.
+
+    Straight alpha, not premultiplied, because that is what the game's files
+    hold and what a canvas expects back.
+    """
+    out = bytearray(base)
+    for row in range(layer_h):
+        target_row = at_y + row
+        if target_row < 0 or target_row >= base_h:
+            continue
+        for column in range(layer_w):
+            target_column = at_x + column
+            if target_column < 0 or target_column >= base_w:
+                continue
+            source = (row * layer_w + column) * 4
+            alpha = layer[source + 3]
+            if not alpha:
+                continue
+            target = (target_row * base_w + target_column) * 4
+            if alpha == 255:
+                out[target:target + 4] = layer[source:source + 4]
+                continue
+            # Source-over in integers, kept at 255x scale until the end.
+            # Dividing the destination term early truncates it to nothing at
+            # low alpha while the numerator keeps it, and the result overflows
+            # a byte.
+            inverse = 255 - alpha
+            existing = out[target + 3]
+            below = existing * inverse                    # 0..65025
+            total = alpha * 255 + below                   # alpha, x255
+            if not total:
+                continue
+            for channel in range(3):
+                blended = (layer[source + channel] * alpha * 255
+                           + out[target + channel] * below)
+                out[target + channel] = min(255, blended // total)
+            out[target + 3] = min(255, (total + 127) // 255)
+    return bytes(out)
 
 
 def crop(data, x, y, width, height):
