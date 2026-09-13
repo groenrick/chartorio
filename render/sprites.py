@@ -199,6 +199,17 @@ def layer_info(node):
 # carries either one `layers` list or a `by` map from key to layers, and the
 # page has one selector per kind.
 DIRECTION_KEYS = {"north": 0, "east": 4, "south": 8, "west": 12}
+# Rails use all eight, at the even steps of Factorio's sixteen directions. A
+# rail drawn on the wrong one of eight is more obviously wrong than a furnace
+# facing the wrong way, because track has to line up with its neighbours.
+DIRECTION_KEYS_8 = {"north": 0, "northeast": 2, "east": 4, "southeast": 6,
+                    "south": 8, "southwest": 10, "west": 12, "northwest": 14}
+
+# A rail is five pictures stacked, and the order is what makes track read as
+# track: the stone bed, then its inner fill, then the sleepers, then the plates
+# the rails sit on, then the rails. Iterating whatever order the data happens to
+# be in would put the ballast over the metals.
+RAIL_PARTS = ("stone_path_background", "stone_path", "ties", "backplates", "metals")
 
 # A pipe's shape comes from which sides are connected, not from its direction.
 # Factorio works this out in C++ and ships no table, so this mapping is a
@@ -238,15 +249,34 @@ def directional_layers(prototype):
     """A table keyed north/east/south/west. Descending into `north` and
     stopping — which is what happened at first — draws every splitter, drill,
     boiler and pump facing north."""
-    def collect(node):
-        if not isinstance(node, dict) or not set(DIRECTION_KEYS) <= set(node):
+    def parts_of(node):
+        """A rail direction is a table of named parts rather than one picture.
+        Composited in RAIL_PARTS order; anything else in there — the segment
+        visualisation, which the game draws for debugging — is left out."""
+        if not isinstance(node, dict) or not any(part in node for part in RAIL_PARTS):
             return None
-        found = {}
-        for key, direction in DIRECTION_KEYS.items():
-            layers = all_layers(node[key]) + working_layers(prototype, key)
-            if layers:
-                found[direction] = layers
-        return found or None
+        layers = []
+        for part in RAIL_PARTS:
+            layers.extend(all_layers(node.get(part)))
+        return layers or None
+
+    def collect(node):
+        if not isinstance(node, dict):
+            return None
+        # Eight directions first: a rail declares all eight, and matching on
+        # the four cardinals alone would take them and lose the diagonals.
+        for keys in (DIRECTION_KEYS_8, DIRECTION_KEYS):
+            if not set(keys) <= set(node):
+                continue
+            found = {}
+            for key, direction in keys.items():
+                layers = parts_of(node[key]) or all_layers(node[key])
+                layers = layers + working_layers(prototype, key)
+                if layers:
+                    found[direction] = layers
+            if found:
+                return found
+        return None
 
     for path in DIRECTIONAL_PATHS:
         found = collect(dig(prototype, path))

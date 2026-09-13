@@ -994,9 +994,15 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
             truncated = true
             break
           end
-          -- Anything that moves is already its own live layer, drawn from a
-          -- faster poll; drawing it here as well would show it twice, a few
-          -- hundred milliseconds apart.
+          -- Anything with a live layer of its own is left out. Things that
+          -- move — players, trains, biters — are drawn from a faster poll and
+          -- would otherwise appear twice, a few hundred milliseconds apart.
+          -- Rail signals are drawn from their own layer too, with the state
+          -- the game currently has on them, which is what a map wants from a
+          -- signal; sending them here as well put a dark square on the track
+          -- for every one, because they have no extracted art.
+          -- A ghost is a plan rather than a thing, and drawing it solid claims
+          -- something was built that was not.
           local kind = entity.type
           local identity = entity.unit_number
           local already = identity ~= nil and seen[identity] ~= nil
@@ -1004,7 +1010,9 @@ commands.add_command("chartorio_entities", "Entities in view for the sprite laye
              and kind ~= "character" and kind ~= "unit" and kind ~= "car"
              and kind ~= "locomotive" and kind ~= "cargo-wagon"
              and kind ~= "fluid-wagon" and kind ~= "artillery-wagon"
-             and kind ~= "item-entity" and kind ~= "particle-source" then
+             and kind ~= "item-entity" and kind ~= "particle-source"
+             and kind ~= "rail-signal" and kind ~= "rail-chain-signal"
+             and kind ~= "entity-ghost" and kind ~= "tile-ghost" then
             local position = entity.position
             local record = {
               n = entity.name,
