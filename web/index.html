@@ -161,6 +161,7 @@
     <h1>Chartorio</h1>
     <div class="status"><span id="status-dot" class="dot down"></span><span id="status-text">connecting…</span></div>
     <div class="status"><span id="viewer-count">0</span> watching</div>
+    <div class="status" id="sprite-loading" hidden><span id="sprite-progress">0</span>% of the artwork loaded</div>
   </header>
   <div class="scroll">
     <section>
@@ -1115,8 +1116,133 @@ let spriteEntities = [];         // what the server last said is in view
 let spriteRequest = null;
 let spritesAvailable = false;
 
-function spritesWanted() {
+// The zoom and layer gate, without regard to whether the art has arrived.
+function spritesInView() {
   return spritesAvailable && layers.terrain && view.scale >= spriteMinScale;
+}
+
+// Entity sprites: on only once their art is in. Half a base drawn in real art
+// and half in colour blocks reads as broken; the colour map on its own does
+// not.
+function spritesWanted() {
+  return spritesInView() && spritesReady.sprites;
+}
+
+// Terrain comes up first and separately, because it is a hundred kilobytes and
+// affects every view.
+function terrainWanted() {
+  return spritesInView() && spritesReady.tiles;
+}
+
+
+// ---------------------------------------------------------------------------
+// Loading the artwork up front
+//
+// Sprites used to be created the first time something needed to draw them, so
+// the map filled in as you looked around: a locomotive sheet is four megabytes
+// and most of a second, arriving mid-pan with nothing to say why.
+//
+// The colour map never waits for any of this — it needs no extracted art at
+// all — so nothing here blocks drawing. A sprite layer simply does not turn on
+// until the art it needs has arrived, rather than appearing in pieces.
+//
+// Order is by what affects the most views: terrain everywhere, then the items
+// and common entities, then rolling stock, which is large and matters only
+// where there are trains. Loading in index order would fetch the slowest,
+// rarest sheets first.
+// ---------------------------------------------------------------------------
+const PRELOAD_AT_ONCE = 6;         // parallel fetches; enough to fill a link
+let spritesReady = { tiles: false, sprites: false, items: false };
+let preloadTotal = 0;
+let preloadDone = 0;
+
+function preloadOrder(payload) {
+  const tiles = [];
+  const items = [];
+  const common = [];
+  const heavy = [];
+  for (const info of Object.values(payload.tiles || {})) tiles.push(info.file);
+  for (const info of Object.values(payload.items || {})) items.push(info.file);
+  for (const entry of Object.values(payload.sprites || {})) {
+    const groups = entry.by ? Object.values(entry.by) : [entry.layers || []];
+    // Rolling stock last: several megabytes each, and only some views have a
+    // train in them.
+    const bucket = entry.kind === "rotated" ? heavy : common;
+    for (const group of groups) {
+      for (const layer of group) {
+        for (const file of (layer.files || [layer.file])) {
+          if (file) bucket.push(file);
+        }
+      }
+    }
+  }
+  return { tiles, items, common, heavy };
+}
+
+function loadOne(file) {
+  return new Promise((resolve) => {
+    const image = spriteImage(file);
+    if (image.complete || image.failed) return resolve();
+    // A sheet that will not load must not hold up the rest: the map already
+    // falls back to a colour block for anything it has no art for.
+    image.addEventListener("load", resolve, { once: true });
+    image.addEventListener("error", resolve, { once: true });
+  });
+}
+
+async function loadAll(files) {
+  const queue = files.slice();
+  const workers = [];
+  for (let n = 0; n < PRELOAD_AT_ONCE; n++) {
+    workers.push((async () => {
+      while (queue.length) {
+        await loadOne(queue.shift());
+        preloadDone += 1;
+        showPreloadProgress();
+      }
+    })());
+  }
+  await Promise.all(workers);
+}
+
+function showPreloadProgress() {
+  const line = document.getElementById("sprite-loading");
+  const value = document.getElementById("sprite-progress");
+  if (!line || !value) return;
+  const done = preloadTotal && preloadDone >= preloadTotal;
+  line.hidden = done || !preloadTotal;
+  if (!done && preloadTotal) {
+    value.textContent = Math.floor(preloadDone / preloadTotal * 100);
+  }
+}
+
+async function preloadSprites(payload) {
+  const order = preloadOrder(payload);
+  const unique = (list) => [...new Set(list)];
+  const tiles = unique(order.tiles);
+  const items = unique(order.items);
+  const common = unique(order.common);
+  const heavy = unique(order.heavy).filter((f) => !common.includes(f));
+  preloadTotal = tiles.length + items.length + common.length + heavy.length;
+  showPreloadProgress();
+
+  // Terrain first: a hundred kilobytes of ground affects every view.
+  await loadAll(tiles);
+  spritesReady.tiles = true;
+  requestDraw();
+
+  await loadAll(common);
+  spritesReady.sprites = true;
+  requestDraw();
+
+  await loadAll(items);
+  spritesReady.items = true;
+  requestDraw();
+
+  // Rolling stock last, and the sprite layer is already usable without it.
+  await loadAll(heavy);
+  showPreloadProgress();
+  requestDraw();
 }
 
 async function loadSpriteIndex() {
@@ -1127,6 +1253,7 @@ async function loadSpriteIndex() {
     tileIndex = payload.tiles || {};
     itemIndex = payload.items || {};
     if (payload.min_scale) spriteMinScale = payload.min_scale;
+    if (spritesAvailable) preloadSprites(payload);   // not awaited: nothing waits on art
   } catch (error) {
     spritesAvailable = false;
   }
@@ -1145,7 +1272,7 @@ function spriteImage(file) {
 }
 
 function requestSprites() {
-  if (!spritesWanted()) {
+  if (!spritesInView()) {
     if (spriteEntities.length) { spriteEntities = []; requestDraw(); }
     return;
   }
@@ -1331,7 +1458,7 @@ function expandRuns(runs, length) {
 // Whether the sprite layer has this chunk's ground covered, so the colour tile
 // underneath can be skipped rather than showing around every sprite.
 function terrainCovers(chunkX, chunkY) {
-  if (!spritesWanted()) return false;
+  if (!terrainWanted()) return false;
   const entry = terrainCache.get(terrainKey(chunkX, chunkY));
   return Boolean(entry) && entry.revision === chartedRevision(chunkX, chunkY);
 }
@@ -1441,7 +1568,7 @@ function chartedRevision(chunkX, chunkY) {
 }
 
 function drawTerrainSprites() {
-  if (!spritesWanted() || !tileIndex) return;
+  if (!terrainWanted() || !tileIndex) return;
   const box = viewportBox();
   const first = { x: Math.floor(box.x1 / CHUNK_TILES), y: Math.floor(box.y1 / CHUNK_TILES) };
   const last = { x: Math.floor(box.x2 / CHUNK_TILES), y: Math.floor(box.y2 / CHUNK_TILES) };
@@ -1508,7 +1635,7 @@ let itemRequest = null;
 
 function itemsWanted() {
   return Boolean(spritesAvailable && layers.items && itemIndex
-                 && view.scale >= ITEM_MIN_SCALE);
+                 && spritesReady.items && view.scale >= ITEM_MIN_SCALE);
 }
 
 function requestBeltItems(refresh = false) {
