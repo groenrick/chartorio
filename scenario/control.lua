@@ -1157,7 +1157,14 @@ commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_
   end
 
   local force = game.forces.player
+  -- Sent as a flat list of numbers with a name table beside it, rather than a
+  -- record per item. At two thousand items a record each is 119 KB a poll,
+  -- most of it the words "n", "x", "y" and "coal" over and over; flat it is
+  -- 51 KB. The poll is what sets how long the browser has to slide an item
+  -- from where it was to where it is, so a smaller answer is a smoother belt.
   local items = {}
+  local names = {}
+  local name_index = {}
   local truncated = false
   local belts = 0
   local seen = {}
@@ -1191,7 +1198,7 @@ commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_
                 if line then
                   local lane = (index == 1) and 1 or -1
                   for _, entry in pairs(line.get_detailed_contents()) do
-                    if #items >= ITEM_LIMIT then
+                    if #items >= ITEM_LIMIT * 4 then
                       truncated = true
                       break
                     end
@@ -1200,11 +1207,26 @@ commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_
                     local along = (entry.position or 0.5) - 0.5
                     local ix = position.x + forward_x * along + side_x * LINE_OFFSET * lane
                     local iy = position.y + forward_y * along + side_y * LINE_OFFSET * lane
-                    items[#items + 1] = {
-                      n = entry.stack and entry.stack.name or nil,
-                      x = math.floor(ix * 16) / 16,
-                      y = math.floor(iy * 16) / 16,
-                    }
+                    local item_name = entry.stack and entry.stack.name
+                    -- Not `index`: that is the transport line being read, and
+                    -- shadowing it here is the same slip that filed a
+                    -- locomotive under one of its own filenames.
+                    local named = name_index[item_name]
+                    if not named then
+                      names[#names + 1] = item_name
+                      named = #names
+                      name_index[item_name] = named
+                    end
+                    -- name, x, y, identity. The identity is the item's own, so
+                    -- the browser can tell where a given item was a moment ago
+                    -- and slide it there rather than guessing from positions:
+                    -- items keep their order on a line but cross from belt to
+                    -- belt, and matching by position alone breaks at every
+                    -- junction.
+                    items[#items + 1] = named
+                    items[#items + 1] = math.floor(ix * 16) / 16
+                    items[#items + 1] = math.floor(iy * 16) / 16
+                    items[#items + 1] = entry.unique_id or 0
                   end
                 end
                 if truncated then break end
@@ -1222,6 +1244,7 @@ commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_
   respond({
     surface = surface.name,
     items = items,
+    names = names,
     belts = belts,
     truncated = truncated,
     clamped = clamped,

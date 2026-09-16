@@ -838,7 +838,8 @@ function movingEntities() {
 // Only run a continuous loop while something actually moves, so an idle map
 // costs nothing.
 function animate() {
-  if ((!movingEntities() || interpolationFactor() >= 1) && !spritesAnimating()) {
+  if ((!movingEntities() || interpolationFactor() >= 1)
+      && !spritesAnimating() && !beltItemsMoving()) {
     animating = false;
     draw();
     return;
@@ -1505,6 +1506,11 @@ const ITEM_TILES = 0.3;          // how much of a tile an item covers
 let itemIndex = null;            // item name -> {file, size}
 let beltItems = [];
 let itemRequest = null;
+// Where each item was at the previous poll, and when that poll landed, so an
+// item can be slid from there to where it is now instead of jumping.
+let previousItems = new Map();
+let itemsArrivedAt = 0;
+let itemsInterval = 300;
 
 function itemsWanted() {
   return Boolean(spritesAvailable && layers.items && itemIndex
@@ -1526,10 +1532,22 @@ function requestBeltItems(refresh = false) {
   fetch("/belt_items?" + query)
     .then((response) => response.json())
     .then((payload) => {
-      beltItems = Array.isArray(payload.items) ? payload.items : [];
+      const arrived = performance.now();
+      // Measure the real gap rather than trusting the tick: a slow answer
+      // would otherwise make everything race to catch up.
+      if (itemsArrivedAt) {
+        itemsInterval = Math.max(80, Math.min(1200, arrived - itemsArrivedAt));
+      }
+      previousItems = new Map();
+      for (const item of beltItems) {
+        if (item.i !== undefined) previousItems.set(item.i, item);
+      }
+      itemsArrivedAt = arrived;
+      // A flat list of name index, x, y, identity, with the names beside it.
+      beltItems = expandBeltItems(payload);
       const counter = document.getElementById("item-count");
       if (counter) counter.textContent = beltItems.length;
-      requestDraw();
+      if (!animating) animate(); else requestDraw();
     })
     .catch(() => {});
 }
@@ -1539,10 +1557,48 @@ function requestBeltItems(refresh = false) {
 // out, so this costs nothing until somebody wants it.
 setInterval(() => { if (itemsWanted()) requestBeltItems(true); }, 300);
 
+// The wire format is flat numbers rather than a record per item, because at two
+// thousand items the words cost more than the numbers. Expanded once a poll.
+function expandBeltItems(payload) {
+  const flat = payload.items;
+  const names = payload.names || [];
+  if (!Array.isArray(flat)) return [];
+  // An older scenario sends records; keep reading them.
+  if (flat.length && typeof flat[0] === "object") return flat;
+  const out = [];
+  for (let at = 0; at + 3 < flat.length; at += 4) {
+    out.push({ n: names[flat[at] - 1], x: flat[at + 1], y: flat[at + 2], i: flat[at + 3] });
+  }
+  return out;
+}
+
+// Where an item is right now, sliding from where it was at the previous poll.
+// Items are matched by their own identity rather than by position, because
+// they keep their order on a line but cross from belt to belt, and matching by
+// position alone breaks at every junction.
+function itemPosition(item) {
+  const was = item.i === undefined ? null : previousItems.get(item.i);
+  if (!was) return item;
+  const stepX = item.x - was.x;
+  const stepY = item.y - was.y;
+  // A belt runs about two tiles a second, so a step much larger than that is
+  // an item that was picked up and put down somewhere else. Do not slide it.
+  if (Math.hypot(stepX, stepY) > 8) return item;
+  const factor = Math.max(0, Math.min(1, (performance.now() - itemsArrivedAt) / itemsInterval));
+  return { n: item.n, x: was.x + stepX * factor, y: was.y + stepY * factor };
+}
+
+function beltItemsMoving() {
+  if (!itemsWanted()) return false;
+  // Only worth a frame while something is actually sliding.
+  return performance.now() - itemsArrivedAt < itemsInterval;
+}
+
 function drawBeltItems() {
   if (!itemsWanted()) return;
   const size = ITEM_TILES * view.scale;
-  for (const item of beltItems) {
+  for (const raw of beltItems) {
+    const item = itemPosition(raw);
     const meta = itemIndex[item.n];
     if (!meta) continue;
     const image = spriteImage(meta.file);
