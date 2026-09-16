@@ -55,6 +55,7 @@ function contextStub() {
 
 function boot() {
   const timers = [];
+  let clock = 0;
   const eventChannels = [];
   const context = {
     console: { log() {}, warn() {}, error() {}, info() {} },
@@ -62,7 +63,7 @@ function boot() {
     Promise, Error, isNaN, isFinite, parseInt, parseFloat,
     Uint8ClampedArray, Uint8Array, Float32Array, Float64Array, Int32Array,
     ArrayBuffer, TextDecoder, TextEncoder, URL, URLSearchParams, Proxy, Symbol,
-    performance: { now: () => 0 },
+    performance: { now: () => context.__clock },
     requestAnimationFrame: () => 1,
     cancelAnimationFrame: () => {},
     setTimeout: (fn) => { timers.push(fn); return timers.length; },
@@ -88,6 +89,7 @@ function boot() {
       close() {}
     },
   };
+  context.__clock = 0;
   context.eventChannels = eventChannels;
   context.window = context;
   context.globalThis = context;
@@ -115,10 +117,14 @@ function boot() {
   // the context the way `function` and `var` do, so the few the tests need are
   // handed out by an epilogue running in the same scope.
   const probe = "\n;globalThis.__page = { view, MAX_ZOOM, CHUNK_TILES, layers,"
+              + " __now(t) { globalThis.__clock = t; },"
               + " SPRITE_PIXELS_PER_TILE, spritesWanted, beltRow, spriteLayers, spriteCell, spriteKey,"
               + " expandRuns, tileVariant, terrainKey, terrainCovers, spriteDepth,"
               + " encodeView, decodeView, applyView, viewPrecision, LAYER_BITS,"
-              + " itemsWanted, __setItemIndex(v) { itemIndex = v; },"
+              + " itemsWanted, __setItemIndex(v) { itemIndex = v; }, itemPosition, beltItemsMoving, expandBeltItems,"
+              + " __setItemsSeen(list, at) { previousItems = new Map();"
+              + "   for (const i of list) previousItems.set(i.i, i);"
+              + "   itemsArrivedAt = at; itemsInterval = 300; },"
               + " rollingStockFrame, drawRollingStock,"
               + " get follow() { return follow; }, set follow(v) { follow = v; },"
               + " __setSpriteIndex(v) { spriteIndex = v; },"
@@ -716,6 +722,93 @@ test("a train with no art falls back to its marker", () => {
   const page = boot();
   page.__setSpriteIndex({ locomotive: { kind: "none", tiles: [1, 1] } });
   assert.equal(page.drawRollingStock({ n: "locomotive", x: 0, y: 0, o: 0 }), false);
+});
+
+test("an item slides from where it was to where it is", () => {
+  const page = boot();
+  page.__setItemsSeen([{ i: 7, n: "coal", x: 10, y: 20 }], 1000);
+  page.__now(1000);
+  const start = page.itemPosition({ i: 7, n: "coal", x: 12, y: 20 });
+  assert.ok(Math.abs(start.x - 10) < 0.01, `at the moment it arrives it is still at the old spot, got ${start.x}`);
+  page.__now(1150);                      // half of a 300ms gap
+  const middle = page.itemPosition({ i: 7, n: "coal", x: 12, y: 20 });
+  assert.ok(Math.abs(middle.x - 11) < 0.05, `halfway should be 11, got ${middle.x}`);
+  page.__now(1300);
+  const end = page.itemPosition({ i: 7, n: "coal", x: 12, y: 20 });
+  assert.ok(Math.abs(end.x - 12) < 0.01, `at the end it has arrived, got ${end.x}`);
+});
+
+test("an item nobody saw before is drawn where it is", () => {
+  // New items appear constantly as a belt feeds; they must not slide in from
+  // the origin.
+  const page = boot();
+  page.__setItemsSeen([], 1000);
+  page.__now(1150);
+  const at = page.itemPosition({ i: 99, n: "coal", x: 5, y: 6 });
+  assert.equal(at.x, 5);
+  assert.equal(at.y, 6);
+});
+
+test("an item that jumped across the map is not slid", () => {
+  // Picked up and put down somewhere else, or an id reused. A belt runs about
+  // two tiles a second; anything much larger is not travel.
+  const page = boot();
+  page.__setItemsSeen([{ i: 3, n: "coal", x: 0, y: 0 }], 1000);
+  page.__now(1150);
+  const at = page.itemPosition({ i: 3, n: "coal", x: 200, y: 200 });
+  assert.equal(at.x, 200, "drawn where it now is, not halfway across the map");
+});
+
+test("an item on a stopped belt does not drift", () => {
+  // A backed up belt reports the same position twice; extrapolating would make
+  // items creep forward and snap back.
+  const page = boot();
+  page.__setItemsSeen([{ i: 1, n: "coal", x: 4, y: 4 }], 1000);
+  page.__now(1250);
+  const at = page.itemPosition({ i: 1, n: "coal", x: 4, y: 4 });
+  assert.equal(at.x, 4);
+  assert.equal(at.y, 4);
+});
+
+test("items without an identity are drawn where they are", () => {
+  // An older scenario does not send one; the layer must still work.
+  const page = boot();
+  page.__setItemsSeen([{ i: 1, n: "coal", x: 0, y: 0 }], 1000);
+  page.__now(1150);
+  const at = page.itemPosition({ n: "coal", x: 9, y: 9 });
+  assert.equal(at.x, 9);
+});
+
+test("the flat wire format expands to items", () => {
+  // name index, x, y, identity — repeated. The name table is 1 based, the way
+  // Lua counts.
+  const page = boot();
+  const out = page.expandBeltItems({ names: ["coal", "iron-plate"],
+                                     items: [1, 10.5, 20.25, 7, 2, 11, 21, 8] });
+  assert.equal(out.length, 2);
+  assert.equal(out[0].n, "coal");
+  assert.equal(out[0].x, 10.5);
+  assert.equal(out[0].i, 7);
+  assert.equal(out[1].n, "iron-plate");
+});
+
+test("a records-style answer from an older scenario still reads", () => {
+  const page = boot();
+  const out = page.expandBeltItems({ items: [{ n: "coal", x: 1, y: 2, i: 3 }] });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].n, "coal");
+});
+
+test("a truncated flat list does not produce a half item", () => {
+  const page = boot();
+  const out = page.expandBeltItems({ names: ["coal"], items: [1, 5, 6, 9, 1, 7] });
+  assert.equal(out.length, 1, "the trailing partial record is dropped");
+});
+
+test("an empty answer is empty, not a crash", () => {
+  const page = boot();
+  assert.equal(page.expandBeltItems({ items: [], names: [] }).length, 0);
+  assert.equal(page.expandBeltItems({}).length, 0);
 });
 
 test("ore totals read the way the game writes them", () => {
