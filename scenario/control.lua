@@ -1208,11 +1208,14 @@ commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_
                     local ix = position.x + forward_x * along + side_x * LINE_OFFSET * lane
                     local iy = position.y + forward_y * along + side_y * LINE_OFFSET * lane
                     local item_name = entry.stack and entry.stack.name
-                    local index = name_index[item_name]
-                    if not index then
+                    -- Not `index`: that is the transport line being read, and
+                    -- shadowing it here is the same slip that filed a
+                    -- locomotive under one of its own filenames.
+                    local named = name_index[item_name]
+                    if not named then
                       names[#names + 1] = item_name
-                      index = #names
-                      name_index[item_name] = index
+                      named = #names
+                      name_index[item_name] = named
                     end
                     -- name, x, y, identity. The identity is the item's own, so
                     -- the browser can tell where a given item was a moment ago
@@ -1220,7 +1223,7 @@ commands.add_command("chartorio_belt_items", "Items on belts in view: chartorio_
                     -- items keep their order on a line but cross from belt to
                     -- belt, and matching by position alone breaks at every
                     -- junction.
-                    items[#items + 1] = index
+                    items[#items + 1] = named
                     items[#items + 1] = math.floor(ix * 16) / 16
                     items[#items + 1] = math.floor(iy * 16) / 16
                     items[#items + 1] = entry.unique_id or 0
