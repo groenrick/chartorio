@@ -21,10 +21,11 @@ function extractScript(source) {
 
 function elementStub() {
   const element = {
-    style: {}, dataset: {}, textContent: "", innerHTML: "", value: "",
+    style: {}, dataset: {}, textContent: "", value: "",
     hidden: false, checked: false, width: 0, height: 0,
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-    addEventListener() {}, removeEventListener() {}, appendChild() {}, append() {},
+    addEventListener() {}, removeEventListener() {},
+    appendChild(child) { element.children.push(child); return child; }, append() {},
     removeChild() {}, remove() {}, insertBefore() {}, setAttribute() {},
     removeAttribute() {}, getAttribute: () => null, focus() {}, blur() {}, click() {},
     scrollIntoView() {}, closest: () => null, contains: () => false,
@@ -33,6 +34,13 @@ function elementStub() {
     getContext: () => contextStub(),
     children: [], firstChild: null, parentNode: null,
   };
+  // A browser empties an element when its innerHTML is set, so the stub has to
+  // as well: a list that is refilled every tick would otherwise only ever grow.
+  let markup = "";
+  Object.defineProperty(element, "innerHTML", {
+    get: () => markup,
+    set(value) { markup = value; element.children.length = 0; },
+  });
   return element;
 }
 
@@ -75,7 +83,14 @@ function boot() {
     innerHeight: 720,
     addEventListener() {}, removeEventListener() {},
     matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
-    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    localStorage: (() => {
+      const saved = new Map();
+      return {
+        getItem: (k) => (saved.has(k) ? saved.get(k) : null),
+        setItem(k, v) { saved.set(k, String(v)); },
+        removeItem(k) { saved.delete(k); },
+      };
+    })(),
     history: { replaceState(_s, _t, url) { context.__lastUrl = url; }, pushState() {} },
     Image: class { set src(_v) {} constructor() { this.onload = null; this.onerror = null; } },
     WebSocket: class {
@@ -131,6 +146,10 @@ function boot() {
               + " __setTerrain(x, y, rev) { terrainCache.set(terrainKey(x, y), { revision: rev, canvas: {} }); },"
               + " __setCharted(x, y, rev) { charted.set(key(x, y), rev); },"
               + " __setSpritesAvailable(v) { spritesAvailable = v; },"
+              + " PANEL_SECTIONS, LIST_SHOWN, fillList, followedFirst, rememberFolding, recallFolding,"
+              + " get foldedSections() { return foldedSections; },"
+              + " set foldedSections(v) { foldedSections = v; },"
+              + " set expandedLists(v) { expandedLists = v; },"
               + " get transport() { return transport; } };";
   vm.runInContext(extractScript(html) + probe, context, { filename: "index.html" });
   // Keep the accessors as accessors, so `transport` stays live, and let
@@ -817,4 +836,116 @@ test("ore totals read the way the game writes them", () => {
   assert.equal(page.formatAmount(12_500), "12.5k");
   assert.equal(page.formatAmount(3_400_000), "3.40M");
   assert.equal(page.formatAmount(2_000_000_000), "2.00G");
+});
+
+// ---------------------------------------------------------------------------
+// The side panel: folding, and lists that are cut short instead of growing
+// until the legend is off the bottom of the screen (#35).
+// ---------------------------------------------------------------------------
+
+test("the controls come before the lists that grow", () => {
+  const page = boot();
+  const order = Array.from(page.PANEL_SECTIONS);
+  // Layers and the legend are what somebody reaches for; players, trains and
+  // alerts are what pushes them off screen, so they may never come first.
+  assert.ok(order.indexOf("layers") < order.indexOf("players"));
+  assert.ok(order.indexOf("legend") < order.indexOf("trains"));
+  assert.ok(order.indexOf("legend") < order.indexOf("alerts"));
+});
+
+test("folded sections survive a reload, and the link does not carry them", () => {
+  const page = boot();
+  page.foldedSections = new Set(["trains", "alerts"]);
+  page.rememberFolding();
+
+  const url = page.encodeView(page.view);
+  assert.ok(!url.includes("trains"), "folding belongs in this browser, not the link");
+  // A link written before any of this still means what it meant: the fields
+  // after the layer mask kept their positions.
+  const old = page.decodeView("#1/0/0/2/ff/nauvis/t:12");
+  // Field by field: an object built inside the vm has a different prototype.
+  assert.equal(old.follow.kind, "train");
+  assert.equal(old.follow.id, 12);
+
+  page.foldedSections = new Set();
+  page.recallFolding();
+  assert.deepEqual([...page.foldedSections].sort(), ["alerts", "trains"]);
+});
+
+test("a section that no longer exists is dropped on the way back in", () => {
+  const page = boot();
+  page.foldedSections = new Set(["trains", "biters"]);   // "biters" was renamed
+  page.rememberFolding();
+  page.foldedSections = new Set();
+  page.recallFolding();
+  assert.deepEqual([...page.foldedSections], ["trains"]);
+});
+
+test("a long list is cut short and says how much is hidden", () => {
+  const page = boot();
+  const list = page.document.createElement("ul");
+  const rows = Array.from({ length: 10 }, () => page.document.createElement("li"));
+  page.expandedLists = new Set();
+  page.fillList(list, rows, "trains");
+
+  assert.equal(list.children.length, page.LIST_SHOWN + 1, "the shown rows plus one 'more'");
+  assert.equal(list.children.at(-1).textContent, `and ${10 - page.LIST_SHOWN} more`);
+});
+
+test("a list that fits is left whole, with nothing to click", () => {
+  const page = boot();
+  const list = page.document.createElement("ul");
+  const rows = Array.from({ length: page.LIST_SHOWN }, () => page.document.createElement("li"));
+  page.expandedLists = new Set();
+  page.fillList(list, rows, "trains");
+  assert.equal(list.children.length, page.LIST_SHOWN);
+});
+
+test("once expanded a list shows everything", () => {
+  const page = boot();
+  const list = page.document.createElement("ul");
+  const rows = Array.from({ length: 10 }, () => page.document.createElement("li"));
+  page.expandedLists = new Set(["trains"]);
+  page.fillList(list, rows, "trains");
+  assert.equal(list.children.length, 10, "no 'more' row once it is open");
+});
+
+test("an empty list says so rather than collapsing to nothing", () => {
+  const page = boot();
+  const list = page.document.createElement("ul");
+  page.fillList(list, [], "trains");
+  assert.match(list.innerHTML, /no trains/);
+  page.fillList(list, [], "players");
+  assert.match(list.innerHTML, /nobody online/);
+});
+
+test("the followed train stays in a list that is cut short", () => {
+  const page = boot();
+  page.follow = { kind: "train", id: 47 };
+  const trains = [
+    { id: 11, speed: 0.9 }, { id: 22, speed: 0.5 }, { id: 47, speed: 0 },
+  ];
+  const order = trains.slice().sort((a, b) =>
+    page.followedFirst(a, b) || Math.abs(b.speed) - Math.abs(a.speed));
+  assert.equal(order[0].id, 47, "parked, but followed, so it may not fall off the end");
+
+  page.follow = null;
+  const unfollowed = trains.slice().sort((a, b) =>
+    page.followedFirst(a, b) || Math.abs(b.speed) - Math.abs(a.speed));
+  assert.deepEqual(unfollowed.map((t) => t.id), [11, 22, 47], "otherwise the fastest first");
+});
+
+test("the legend starts folded, because it is long and read least", () => {
+  const page = boot();
+  assert.ok(page.foldedSections.has("legend"));
+  assert.ok(!page.foldedSections.has("trains"), "the lists somebody watches stay open");
+});
+
+test("a saved empty set means everything open, not the default", () => {
+  const page = boot();
+  page.foldedSections = new Set();
+  page.rememberFolding();
+  page.foldedSections = new Set(["legend"]);
+  page.recallFolding();
+  assert.equal(page.foldedSections.size, 0, "unfolding the legend has to stick");
 });

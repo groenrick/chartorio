@@ -52,6 +52,19 @@
   .dot.down { background: #e05c5c; }
 
   .scroll { overflow-y: auto; }
+  /* A list that grows keeps its own scroll, so the controls above it stay put
+     however large the factory gets. */
+  section ul, #legend { max-height: 190px; overflow-y: auto; }
+  h2::before {
+    content: "▾";
+    display: inline-block;
+    width: 10px;
+    font-size: 9px;
+    opacity: 0.55;
+  }
+  section.folded h2::before { content: "▸"; }
+  section.folded > *:not(h2) { display: none; }
+  .more { padding: 4px 0 0; opacity: 0.6; cursor: pointer; }
   section { padding: 10px 12px; border-bottom: 1px solid var(--border); }
   section:last-child { border-bottom: 0; }
   h2 {
@@ -61,6 +74,8 @@
     text-transform: uppercase;
     color: var(--muted);
     font-weight: 400;
+    cursor: pointer;
+    user-select: none;
   }
   ul { margin: 0; padding: 0; list-style: none; }
   li {
@@ -163,15 +178,7 @@
     <div class="status"><span id="viewer-count">0</span> watching</div>
   </header>
   <div class="scroll">
-    <section>
-      <h2>Players (<span id="player-count">0</span>)</h2>
-      <ul id="players"></ul>
-    </section>
-    <section>
-      <h2>Trains (<span id="train-count">0</span>)</h2>
-      <ul id="trains"></ul>
-    </section>
-    <section>
+    <section data-section="layers">
       <h2>Layers</h2>
       <label class="toggle"><input type="checkbox" id="layer-terrain" checked> terrain</label>
       <label class="toggle"><input type="checkbox" id="layer-biters" checked> biters <span class="meta" id="biter-count">0</span></label>
@@ -184,15 +191,23 @@
       <label class="toggle"><input type="checkbox" id="layer-pollution"> pollution</label>
       <div class="note">Nests sit in the terrain layer, so they stay visible once charted. Moving biters need current radar or player vision, exactly like the in-game map.</div>
     </section>
-    <section>
+    <section data-section="legend">
       <h2>Legend</h2>
       <div id="legend"></div>
     </section>
-    <section>
+    <section data-section="players">
+      <h2>Players (<span id="player-count">0</span>)</h2>
+      <ul id="players"></ul>
+    </section>
+    <section data-section="trains">
+      <h2>Trains (<span id="train-count">0</span>)</h2>
+      <ul id="trains"></ul>
+    </section>
+    <section data-section="alerts">
       <h2>Alerts</h2>
       <ul id="alerts"></ul>
     </section>
-    <section>
+    <section data-section="map">
       <h2>Map</h2>
       <div class="meta"><span id="chunk-count">0</span> charted chunks · <span id="tile-loaded">0</span> tiles drawn</div>
       <div class="meta">zoom level <span id="zoom-level">0</span> · pollution peak <span id="pollution-peak">0</span></div>
@@ -1740,6 +1755,90 @@ function renderAlerts() {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// The panel
+//
+// The lists that grow — players, trains, alerts — are the ones read least, and
+// the controls that never grow are the ones reached for most, so the controls
+// sit above them. Sections fold, and which are folded is remembered in this
+// browser; see the note on FOLD_KEY for why it is not in the link.
+//
+// A long list is cut short rather than allowed to push everything else down;
+// the rest is one click away.
+// ---------------------------------------------------------------------------
+const PANEL_SECTIONS = ["layers", "legend", "players", "trains", "alerts", "map"];
+const LIST_SHOWN = 6;            // before "and N more"
+let foldedSections = new Set(["legend"]);
+let expandedLists = new Set();
+
+function applyFolding() {
+  for (const name of PANEL_SECTIONS) {
+    const section = document.querySelector(`[data-section="${name}"]`);
+    if (section) section.classList.toggle("folded", foldedSections.has(name));
+  }
+}
+
+function setUpFolding() {
+  recallFolding();
+  for (const name of PANEL_SECTIONS) {
+    const section = document.querySelector(`[data-section="${name}"]`);
+    const heading = section && section.querySelector("h2");
+    if (!heading) continue;
+    heading.addEventListener("click", () => {
+      if (foldedSections.has(name)) foldedSections.delete(name);
+      else foldedSections.add(name);
+      applyFolding();
+      rememberFolding();
+    });
+  }
+  applyFolding();
+}
+
+// Kept in this browser rather than in the link. Which sections somebody has
+// folded is a preference, not something they would send to anybody else, and
+// putting it in the URL would have shifted the fields after it and misread
+// every link already shared.
+const FOLD_KEY = "chartorio.folded";
+
+function rememberFolding() {
+  try {
+    localStorage.setItem(FOLD_KEY, [...foldedSections].join(","));
+  } catch (error) { /* private window, or storage turned off */ }
+}
+
+function recallFolding() {
+  try {
+    const saved = localStorage.getItem(FOLD_KEY);
+    if (saved === null) return;                 // never touched: keep the default
+    foldedSections = new Set(saved.split(",").filter((name) => PANEL_SECTIONS.includes(name)));
+  } catch (error) { /* nothing saved, and nothing to do about it */ }
+}
+
+function followedFirst(a, b) {
+  if (!follow || follow.kind !== "train") return 0;
+  const id = String(follow.id);
+  return (String(b.id) === id) - (String(a.id) === id);
+}
+
+// A list, cut short, with the rest one click away.
+function fillList(element, rows, name) {
+  element.innerHTML = "";
+  if (!rows.length) {
+    element.innerHTML = '<li class="empty">' + (name === "trains" ? "no trains" : "nobody online") + "</li>";
+    return;
+  }
+  const showAll = expandedLists.has(name) || rows.length <= LIST_SHOWN;
+  for (const row of (showAll ? rows : rows.slice(0, LIST_SHOWN))) element.appendChild(row);
+  if (!showAll) {
+    const more = document.createElement("li");
+    more.className = "more";
+    more.textContent = `and ${rows.length - LIST_SHOWN} more`;
+    more.onclick = () => { expandedLists.add(name); renderPanel(); };
+    element.appendChild(more);
+  }
+}
+
 function renderPanel() {
   const statusDot = document.getElementById("status-dot");
   const statusText = document.getElementById("status-text");
@@ -1750,7 +1849,7 @@ function renderPanel() {
 
   const players = document.getElementById("players");
   document.getElementById("player-count").textContent = state.players.length;
-  players.innerHTML = state.players.length ? "" : '<li class="empty">nobody online</li>';
+  const playerRows = [];
   for (const player of state.players) {
     const item = document.createElement("li");
     if (follow && follow.kind === "player" && follow.id === player.name) item.classList.add("followed");
@@ -1758,13 +1857,21 @@ function renderPanel() {
       + `<span class="name"></span><span class="meta">${Math.round(player.x)}, ${Math.round(player.y)}</span>`;
     item.querySelector(".name").textContent = player.name;
     item.onclick = () => { follow = { kind: "player", id: player.name }; followTarget(); renderPanel(); writeView(); requestDraw(); };
-    players.appendChild(item);
+    playerRows.push(item);
   }
+  fillList(players, playerRows, "players");
 
   const trains = document.getElementById("trains");
   document.getElementById("train-count").textContent = state.trains.length;
-  trains.innerHTML = state.trains.length ? "" : '<li class="empty">no trains</li>';
-  for (const train of state.trains) {
+  const trainRows = [];
+  // A list cut short should keep the ones worth looking at. The followed train
+  // comes first whatever it is doing, because a parked one sorted to the bottom
+  // would fall off the end and leave no way to see it or stop following it.
+  const orderedTrains = state.trains.slice().sort((a, b) =>
+    followedFirst(a, b)
+    || Math.abs(b.speed || 0) - Math.abs(a.speed || 0)
+    || String(a.destination || "").localeCompare(String(b.destination || "")));
+  for (const train of orderedTrains) {
     const item = document.createElement("li");
     if (follow && follow.kind === "train" && String(follow.id) === String(train.id)) item.classList.add("followed");
     item.innerHTML = `<span class="swatch" style="background:${TRAIN_STATE_COLORS[train.state] || "#8a7d6d"}"></span>`
@@ -1772,8 +1879,9 @@ function renderPanel() {
       + `<span class="meta">${Math.abs(Math.round((train.speed || 0) * 216))} km/h</span>`;
     item.querySelector(".name").textContent = `#${train.id} ${train.destination || train.state}`;
     item.onclick = () => { follow = { kind: "train", id: train.id }; followTarget(); renderPanel(); writeView(); requestDraw(); };
-    trains.appendChild(item);
+    trainRows.push(item);
   }
+  fillList(trains, trainRows, "trains");
 
   renderAlerts();
 }
@@ -2455,6 +2563,8 @@ applyView(decodeView(location.hash));
 window.addEventListener("hashchange", () => {
   if (applyView(decodeView(location.hash))) { sendViewport(true); renderPanel(); requestDraw(); }
 });
+
+setUpFolding();
 
 connect();
 
